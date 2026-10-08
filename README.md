@@ -7,19 +7,20 @@ Elaborado por **MDF Consulting** · Ingeniería Civil Industrial UDD · 2026.
 
 | Pestaña | Qué muestra |
 |---|---|
-| Resumen ejecutivo | KPIs principales, venta mensual vs año anterior, mix de producto, segmentos y hallazgos clave |
-| Ventas | Tendencia histórica, venta por tipo, forma de pago, vendedora y día de la semana |
-| Clientes y canales | Segmentos, convenios, profesionales que derivan, edad y canal convenio institucional |
+| Resumen ejecutivo | KPIs con semáforo de metas, cascada del ingreso al margen operacional, cuadro de metas, venta mensual y hallazgos clave. Botón de reporte en Excel |
+| Resultados por línea | Estado de resultados por línea de producto: ingresos netos, costo directo, margen directo, gastos operacionales y margen operacional |
+| Comercial | Tendencia de venta, segmentos, ticket, formas de pago, vendedoras, convenios, derivación y canal institucional |
 | Operaciones | Plazos de entrega, atrasos, pedidos de cristales y mix de proveedores |
-| Rentabilidad | Margen por familia y producto (informe de costos) y margen de lista del inventario |
-| Convenios | Cartera de convenios por categoría, antigüedad y estado |
-| Calidad de datos | Registro de OT, trazabilidad entre sistemas y auditoría para TI |
-| Datos | Bases cargadas, cómo actualizarlas y descarga de tablas limpias |
+| Calidad de datos | Registro de OT, auditoría para TI, trazabilidad entre sistemas y descarga de tablas |
+
+Los gastos operacionales y las metas se editan en la barra lateral. Los gastos que vienen por defecto
+son **supuestos** de MDF Consulting y deben reemplazarse por las cifras reales de COALIVI.
 
 ## Estructura
 
 ```
 app.py               # la aplicación Streamlit
+logo.png             # logo de Óptica COALIVI
 procesamiento.py     # limpieza de las planillas originales
 data/*.csv.gz        # tablas limpias que lee el dashboard
 .streamlit/config.toml

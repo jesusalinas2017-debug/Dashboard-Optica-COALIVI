@@ -102,6 +102,20 @@ def nombre_vendedora(serie):
     return s.fillna('Sin registro').str.title()
 
 
+# Líneas de producto para el estado de resultados (según el 'Tipo' de la boleta)
+LINEAS = ['Cristales', 'Armazones', 'Lentes de sol', 'Accesorios y líquidos', 'Reparaciones y otros']
+TIPO_A_LINEA = {'CRISTALES': 'Cristales', 'ARMAZON': 'Armazones', 'GAFA': 'Lentes de sol',
+                'ACCESORIO': 'Accesorios y líquidos', 'LIQUIDO': 'Accesorios y líquidos'}
+# Familias del informe de costos -> líneas
+FAMILIA_A_LINEA = {'CRISTAL': 'Cristales', 'ARMAZON': 'Armazones', 'GAFAS': 'Lentes de sol',
+                   'ACCESORIO': 'Accesorios y líquidos'}
+
+
+def linea_producto(tipo):
+    # Todo lo que no calza con las 4 primeras líneas va a 'Reparaciones y otros'
+    return TIPO_A_LINEA.get(sin_tildes(tipo), 'Reparaciones y otros')
+
+
 def segmento(convenio):
     # Agrupa los convenios de la OT de sala en 3 segmentos comerciales
     c = str(convenio)
@@ -346,7 +360,8 @@ def guardar_tablas(tablas, carpeta='data'):
 
 
 def leer_tabla(ruta, clave):
-    df = pd.read_csv(ruta, low_memory=False,
+    # 'ruta' puede ser la ruta del .csv.gz o el archivo ya abierto (por ejemplo, desde un zip)
+    df = pd.read_csv(ruta, low_memory=False, compression='gzip',
                      dtype={'ot': 'object', 'codigo': 'object', 'folio': 'object'})
     # Fechas y verdadero/falso vuelven como texto desde el CSV: se convierten
     for col in FECHAS.get(clave, []):
