@@ -316,8 +316,42 @@ LIMPIEZA = {
 # ---------------------------------------------------------------------------
 # 4. Identificar, leer y procesar un archivo original
 # ---------------------------------------------------------------------------
-def identificar(nombre_archivo):
-    # Devuelve la clave de la base según el nombre del archivo (o None)
+# Columnas que necesita cada base. Sirven para dos cosas:
+#   1) reconocer la planilla por su contenido, aunque le cambien el nombre al archivo
+#   2) avisar con claridad si a la planilla le falta alguna columna
+COLUMNAS = {
+    'ventas': ['Fecha Emision', 'Folio', 'Producto', 'Tipo', 'Cantidad', 'Precio', 'Total',
+               'Codigo Vendedor', 'Forma de pago', 'ESTADO OT SISTEMA', 'nota de credito',
+               'ot no registradas'],
+    'ot_sala': ['OT', 'FECHA OT', 'VENDEDORA', 'CONVENIO', 'ORIGEN', 'EDAD', 'total',
+                'estado de ot', 'Fecha de entrega', 'FECHA ENTREGA'],
+    'ot_convenio': ['OT', 'FECHA OT', 'VENDEDORA', 'CONVENIO', 'CENTRO DE ORIGEN', 'EDAD'],
+    'pedidos': ['FECHA_PEDIDO', 'PROVEEDOR', 'CRISTAL', 'OT'],
+    'costos': ['Fecha', 'OT', 'Vendedora', 'Familia', 'Tipo', 'Producto', 'Producto Analítico',
+               'Pventa Total', 'Pcosto Total', 'Costo Match', 'PROVEEDOR'],
+    'inventario': ['CODIGO', 'NOMBRE ITEM', 'TIPO ITEM', 'MARCA', 'MATERIAL', 'PROVEEDOR',
+                   'ADICIONAL', 'S.VENTAS', 'P.COMPRA', 'P.VENTA'],
+    'convenios': ['Fecha convenio', 'Estado'],
+}
+
+
+def _abrir(archivo):
+    # Deja el archivo listo para leerlo varias veces (ruta o bytes de un archivo subido)
+    if isinstance(archivo, (bytes, bytearray)):
+        return io.BytesIO(archivo)
+    if hasattr(archivo, 'seek'):
+        archivo.seek(0)
+    return archivo
+
+
+def _faltantes(columnas, clave):
+    # Columnas requeridas que no están (se compara sin tildes ni mayúsculas)
+    presentes = {sin_tildes(c) for c in columnas}
+    return [c for c in COLUMNAS[clave] if sin_tildes(c) not in presentes]
+
+
+def identificar_por_nombre(nombre_archivo):
+    # Devuelve la clave de la base según palabras del nombre del archivo (o None)
     n = sin_tildes(nombre_archivo)
     for clave, info in BASES.items():
         if any(palabra in n for palabra in info['claves']):
@@ -325,27 +359,65 @@ def identificar(nombre_archivo):
     return None
 
 
+def identificar_por_columnas(archivo):
+    # Lee solo los encabezados de la PRIMERA hoja y ve con qué base calzan las columnas.
+    # Se prueba el encabezado en la fila 1 y en la fila 3 (Convenios COALIVI parte en la fila 3).
+    # Devuelve la base con más columnas encontradas, si tiene al menos el 60% de ellas (o None).
+    mejor, mejor_pct = None, 0
+    for fila_encabezado in (0, 2):
+        try:
+            columnas = pd.read_excel(_abrir(archivo), sheet_name=0, header=fila_encabezado, nrows=0).columns
+        except Exception:
+            return None
+        for clave, requeridas in COLUMNAS.items():
+            pct = 1 - len(_faltantes(columnas, clave)) / len(requeridas)
+            # Si empatan, gana la que exige más columnas (la más específica)
+            if (pct, len(requeridas)) > (mejor_pct, len(COLUMNAS.get(mejor, []))):
+                mejor, mejor_pct = clave, pct
+    return mejor if mejor_pct >= 0.6 else None
+
+
+def identificar(archivo, nombre_archivo):
+    # Primero por el nombre del archivo (rápido); si no se reconoce, por sus columnas
+    return identificar_por_nombre(nombre_archivo) or identificar_por_columnas(archivo)
+
+
+def normalizar_columnas(df, clave):
+    # Si TI cambia mayúsculas o tildes de una columna, se deja con el nombre que espera el código
+    canonico = {sin_tildes(c): c for c in COLUMNAS[clave]}
+    df = df.copy()
+    df.columns = [canonico.get(sin_tildes(c), c) for c in df.columns]
+    return df
+
+
 def leer_original(archivo, clave):
-    # 'archivo' puede ser una ruta o los bytes de un archivo subido
-    if isinstance(archivo, (bytes, bytearray)):
-        archivo = io.BytesIO(archivo)
     info = BASES[clave]
     hoja = info['hoja']
     if isinstance(hoja, str):
         # Si la hoja con ese nombre no existe, se usa la primera
-        hojas = pd.ExcelFile(archivo).sheet_names
+        hojas = pd.ExcelFile(_abrir(archivo)).sheet_names
         hoja = hoja if hoja in hojas else 0
-        if hasattr(archivo, 'seek'):
-            archivo.seek(0)
-    return pd.read_excel(archivo, sheet_name=hoja, header=info['header'])
+    return pd.read_excel(_abrir(archivo), sheet_name=hoja, header=info['header'])
 
 
 def procesar_archivo(archivo, nombre_archivo):
-    # Lee y limpia un archivo original. Devuelve (clave, tabla_limpia)
-    clave = identificar(nombre_archivo)
+    # Reconoce, lee, revisa y limpia un archivo original. Devuelve (clave, tabla_limpia)
+    clave = identificar(archivo, nombre_archivo)
     if clave is None:
-        raise ValueError('no corresponde a ninguna base del dashboard, se ignoró.')
+        raise ValueError('no corresponde a ninguna base del dashboard (ni por su nombre ni por sus '
+                         'columnas), se ignoró.')
     bruto = leer_original(archivo, clave)
+
+    # Revisar que estén todas las columnas antes de limpiar
+    if isinstance(bruto, dict):                       # convenios: varias hojas
+        bruto = {hoja: normalizar_columnas(d, clave) for hoja, d in bruto.items()}
+        faltan = _faltantes(next(iter(bruto.values())).columns, clave) if bruto else COLUMNAS[clave]
+    else:
+        bruto = normalizar_columnas(bruto, clave)
+        faltan = _faltantes(bruto.columns, clave)
+    if faltan:
+        raise ValueError(f'parece ser la planilla de "{BASES[clave]["nombre"]}", pero le faltan las '
+                         f'columnas: {", ".join(faltan)}. Revisar con TI si cambiaron de nombre.')
     return clave, LIMPIEZA[clave](bruto)
 
 

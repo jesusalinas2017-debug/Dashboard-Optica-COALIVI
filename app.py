@@ -324,8 +324,8 @@ with st.sidebar:
 
     with st.expander('Cargar / actualizar bases de datos', expanded=not datos):
         st.caption('Sube las planillas originales (.xlsx) tal como las entrega TI. '
-                   'Se reconocen por su nombre y reemplazan a las del repositorio mientras '
-                   'la página esté abierta.')
+                   'Se reconocen por sus columnas (aunque el archivo tenga otro nombre) y '
+                   'reemplazan a las del repositorio mientras la página esté abierta.')
         subidos = st.file_uploader('Planillas Excel', type=['xlsx'],
                                    accept_multiple_files=True, label_visibility='collapsed')
         for archivo in subidos or []:
