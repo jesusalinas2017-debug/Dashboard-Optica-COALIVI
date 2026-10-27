@@ -122,6 +122,9 @@ html, body, [class*="css"] {{ font-family: 'Inter', 'Segoe UI', sans-serif; }}
 .tabla td {{ border-bottom: 1px solid {GRILLA}; padding: 7px 10px; color: {TINTA}; text-align: right; }}
 .tabla tr.total td {{ font-weight: 700; border-top: 2px solid {AZUL}; background: #F4F6FA; }}
 .tabla td.neg {{ color: {ROJO}; }}
+.tabla-caja {{ width: 100%; max-width: 100%; overflow-x: auto; margin-bottom: 6px; }}
+.tabla td {{ white-space: nowrap; }}
+.tabla td:first-child {{ white-space: normal; min-width: 120px; }}
 
 /* Pestañas */
 .stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 2px solid {GRILLA}; }}
@@ -303,7 +306,9 @@ def tabla_html(df, con_total=False, negativas=()):
             neg = ' class="neg"' if c in negativas and str(valor).startswith('-') else ''
             celdas += f'<td{neg}>{valor}</td>'
         filas += f'<tr{clase}>{celdas}</tr>'
-    st.markdown(f'<table class="tabla"><tr>{cab}</tr>{filas}</table>', unsafe_allow_html=True)
+    # La caja con scroll evita que una tabla ancha se monte sobre la columna del lado
+    st.markdown(f'<div class="tabla-caja"><table class="tabla"><tr>{cab}</tr>{filas}</table></div>',
+                unsafe_allow_html=True)
 
 
 def logo_base64():
@@ -918,20 +923,18 @@ with tabs[1]:
                 tarjeta('Margen directo real', pct(tot['pct'].iloc[0]), None, mm(tot['margen'].iloc[0])),
                 tarjeta('Margen por OT', clp(tot['por_ot'].iloc[0]), None, 'neto de IVA'),
             ])
-            col1, col2 = st.columns(2, gap='medium')
-            with col1:
-                seccion('Por familia de producto')
-                tabla_margen(margen_por('familia'), 'Familia')
-                seccion('Cristales por tipo de lente', 'margen por OT = solo los cristales')
-                tabla_margen(margen_por('tipo_lente', solo_cristal=True)
-                             .sort_values('por_ot', ascending=False), 'Tipo de lente')
-            with col2:
-                seccion('Según quién deriva la OT')
-                tabla_margen(margen_por('origen_tipo'), 'Derivado por')
-                seccion('OT con y sin descuento')
-                r = margen_por('con_descuento')
-                r.index = r.index.map({True: 'Con descuento', False: 'Sin descuento'})
-                tabla_margen(r, 'Descuento')
+            # Tablas de 7 columnas: van a ancho completo (en media pantalla no caben)
+            seccion('Por familia de producto')
+            tabla_margen(margen_por('familia'), 'Familia')
+            seccion('Cristales por tipo de lente', 'margen por OT = solo los cristales')
+            tabla_margen(margen_por('tipo_lente', solo_cristal=True)
+                         .sort_values('por_ot', ascending=False), 'Tipo de lente')
+            seccion('Según quién deriva la OT')
+            tabla_margen(margen_por('origen_tipo'), 'Derivado por')
+            seccion('OT con y sin descuento', 'venta neta = lo realmente cobrado, después del descuento')
+            r = margen_por('con_descuento')
+            r.index = r.index.map({True: 'Con descuento', False: 'Sin descuento'})
+            tabla_margen(r, 'Descuento')
 
             prod = ok.groupby('producto').agg(OT=('ot', 'nunique'), venta=('venta_neta', 'sum'),
                                               costo=('costo', 'sum'), familia=('familia', 'first')).reset_index()
