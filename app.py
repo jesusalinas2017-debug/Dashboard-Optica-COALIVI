@@ -467,12 +467,14 @@ if v_ant.empty:
 # 5. Estado de resultados por línea de producto
 # =============================================================================
 def porcentaje_costo():
-    # % de costo directo sobre el precio de venta (con IVA), por línea, según el informe de costos.
+    # % de costo directo sobre lo REALMENTE cobrado (con IVA, después del descuento), por línea, según el
+    # informe de costos. Se usa lo cobrado porque las boletas ya vienen con el descuento aplicado.
     # Las líneas sin datos propios usan el promedio general.
     ok = costos[costos['costeable']] if not costos.empty else costos
-    if not ok.empty and ok['venta'].sum() > 0:
-        general = ok['costo'].sum() / ok['venta'].sum()
-        por_linea = ok.groupby('linea').agg(venta=('venta', 'sum'), costo=('costo', 'sum'), n=('venta', 'size'))
+    if not ok.empty and ok['venta_cobrada'].sum() > 0:
+        general = ok['costo'].sum() / ok['venta_cobrada'].sum()
+        por_linea = ok.groupby('linea').agg(venta=('venta_cobrada', 'sum'), costo=('costo', 'sum'),
+                                            n=('venta', 'size'))
     else:
         general, por_linea = 0.25, pd.DataFrame(columns=['venta', 'costo', 'n'])
     filas = []
@@ -681,7 +683,8 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-tabs = st.tabs(['Resumen ejecutivo', 'Resultados por línea', 'Comercial', 'Operaciones', 'Calidad de datos'])
+tabs = st.tabs(['Resumen ejecutivo', 'Resultados por línea', 'Comercial', 'Descuentos', 'Operaciones',
+                'Calidad de datos'])
 
 
 # =============================================================================
@@ -786,7 +789,9 @@ with tabs[0]:
                               f'contra {clp(tk_tipo["Sin registro"])} de las OT sin derivador registrado. '
                               f'Solo el {pct(der_act)} de las OT registra quién deriva.')
         if not pd.isna(dsc_act):
-            puntos.append(f'El <b>{pct(dsc_act)}</b> de las OT particulares tiene descuento.')
+            d_real = s_act.loc[s_act['con_descuento'], 'descuento_pct'].median()
+            puntos.append(f'El <b>{pct(dsc_act)}</b> de las OT particulares tiene descuento '
+                          f'(mediana <b>{pct(d_real, 0)}</b> sobre el precio de lista; ver pestaña Descuentos).')
         if not pd.isna(lt_act):
             puntos.append(f'Una OT particular demora <b>{miles(lt_act)} días</b> (mediana) en entregarse y el '
                           f'<b>{pct(atr_act)}</b> se entrega después de la fecha prometida.')
@@ -891,7 +896,7 @@ with tabs[1]:
         if ok.empty:
             sin_datos('El informe de costos no está cargado.')
         else:
-            ok['venta_neta'] = ok['venta'] / FACTOR_IVA
+            ok['venta_neta'] = ok['venta_cobrada'] / FACTOR_IVA      # lo realmente cobrado (con descuento)
 
             def margen_por(por, solo_cristal=False):
                 base = ok[ok['familia'] == 'Cristal'] if solo_cristal else ok
@@ -1079,40 +1084,166 @@ with tabs[2]:
             nc = 100 * nc_act.loc[nc_act['es_nc'], 'total'].sum() / venta_act if venta_act else np.nan
             st.caption(f'Notas de crédito: {pct(nc, 2)} de la venta particular del período.')
 
-    with st.expander('Descuentos'):
-        if s_act.empty:
-            sin_datos()
-        else:
-            con, sin = s_act[s_act['con_descuento']], s_act[~s_act['con_descuento']]
-            fila_kpi([
-                tarjeta('OT con descuento', pct(dsc_act), diferencia(dsc_act, dsc_ant), COMPARADO,
-                        invertir=True, puntos=True),
-                tarjeta('Descuento promedio', pct(s_act['descuento_pct'].mean()), None, 'cuando hay descuento'),
-                tarjeta('Ticket con descuento', clp(ticket_ot(con)), None, 'con IVA'),
-                tarjeta('Ticket sin descuento', clp(ticket_ot(sin)), None, 'con IVA'),
-            ])
-            col1, col2 = st.columns(2, gap='medium')
-            with col1:
-                seccion('% de OT con descuento', 'mes a mes, últimos 24 meses')
-                dm = ot_sala[ot_sala['fecha'] > fecha_max - pd.DateOffset(months=24)]
-                dm = dm.groupby('mes', as_index=False)['con_descuento'].mean()
-                dm['pct'] = 100 * dm['con_descuento']
-                linea_mensual(dm, 'pct', formato='%', alto=320, color=SERIES[1])
-            with col2:
-                dd = s_act['descuento_pct'].dropna().astype(int).value_counts().sort_index().reset_index()
-                dd.columns = ['descuento', 'OT']
-                dd['descuento'] = dd['descuento'].astype(str) + '%'
-                fig = px.bar(dd, x='descuento', y='OT', title=f'Descuentos aplicados · {ACT}')
-                fig.update_traces(marker_color=AZUL, hovertemplate='%{x}<br>%{y} OT<extra></extra>')
-                fig.update_layout(xaxis_title='% de descuento', yaxis_title=None, xaxis_type='category')
-                mostrar(fig, 320)
+
+# =============================================================================
+# 12. Pestaña: Descuentos (cuánto se descuenta, cuánto margen cuesta y cuánto aguanta cada línea)
+# =============================================================================
+def nombre_codigo(codigo):
+    # 'Código 11 (~20%)' para mostrar en tablas
+    if pd.isna(codigo):
+        return 'Sin descuento registrado'
+    return f'Código {str(codigo).title()}'      # el % real de cada código está en la tabla
+
+
+def margen_con_descuento(precio, costo, d):
+    # Margen directo (%) si al precio de lista neto se le aplica un descuento d (%)
+    cobrado = precio * (1 - d / 100)
+    return 100 * (cobrado - costo) / cobrado if cobrado > 0 else np.nan
+
+
+def descuento_maximo(precio, costo, meta):
+    # Mayor descuento (%) que mantiene el margen directo sobre la meta: 1 - costo / (precio x (1 - meta))
+    if precio <= 0 or meta >= 100:
+        return np.nan
+    return 100 * (1 - costo / (precio * (1 - meta / 100)))
+
+
+with tabs[3]:
+    nota('<b>Cómo se calcula.</b> El campo de descuento de la OT (<i>descT</i>) <b>no es el porcentaje, es un código</b>. '
+         'El % real se obtiene comparando lo cobrado en la OT con el precio de lista de sus productos (informe de '
+         'costos): por ejemplo, el código 8 ≈ 10%, el 11 ≈ 20% y el 12 ≈ 30%. El margen se calcula con montos netos '
+         'de IVA; el descuento baja lo cobrado pero el costo del producto es el mismo.')
+
+    # Productos con venta y costo del informe de costos, en el período (si no hay, todo el informe)
+    kd = periodo(costos)
+    texto_k = f'{ACT}'
+    if kd.empty:
+        kd = costos
+        texto_k = f'todo el informe ({rango_k})'
+    kd = kd[kd['costeable']].copy() if not kd.empty else kd
+
+    if kd.empty or s_act.empty:
+        sin_datos('No hay informe de costos u OT particulares para calcular el impacto de los descuentos.')
+    else:
+        kd['lista_neta'] = kd['venta'] / FACTOR_IVA
+        kd['cobrado_neto'] = kd['venta_cobrada'] / FACTOR_IVA
+        lista_n, cobrado_n, costo_n = kd['lista_neta'].sum(), kd['cobrado_neto'].sum(), kd['costo'].sum()
+        m_lista = 100 * (lista_n - costo_n) / lista_n
+        m_real = 100 * (cobrado_n - costo_n) / cobrado_n
+        k_con = kd[kd['con_descuento']]
+        desc_pond = 100 * (1 - k_con['cobrado_neto'].sum() / k_con['lista_neta'].sum()) if not k_con.empty else np.nan
+        sin_cod = s_act[s_act['rebaja_sin_codigo']]
+
+        fila_kpi([
+            tarjeta('OT con descuento', pct(dsc_act), diferencia(dsc_act, dsc_ant), COMPARADO,
+                    invertir=True, puntos=True),
+            tarjeta('Descuento real promedio', pct(desc_pond), None,
+                    'en las OT con descuento · ponderado por monto'),
+            tarjeta('Monto descontado', mm(lista_n - cobrado_n), None,
+                    f'neto de IVA · {pct(100 * (lista_n - cobrado_n) / lista_n)} del precio de lista'),
+            tarjeta('Margen directo real', pct(m_real), m_real - m_lista, 'vs margen a precio de lista',
+                    puntos=True),
+        ])
+        st.caption(f'Montos y margen calculados con los productos del informe de costos ({texto_k}). '
+                   f'Además, {miles(len(sin_cod))} OT particulares del período no tienen descuento registrado pero se '
+                   f'cobraron bajo el precio de lista (rebajas sin código).')
+
+        # ---- Impacto de cada código de descuento
+        seccion('Impacto de cada código de descuento', f'productos con costo · {texto_k} · montos netos de IVA')
+        kd['codigo'] = kd['codigo_descuento'].apply(nombre_codigo)
+        imp = kd.groupby('codigo').agg(OT=('ot', 'nunique'), lista=('lista_neta', 'sum'),
+                                       cobrado=('cobrado_neto', 'sum'), costo=('costo', 'sum'))
+        imp.loc['Total'] = imp.sum()
+        imp.loc['Total', 'OT'] = kd['ot'].nunique()
+        imp['descontado'] = imp['lista'] - imp['cobrado']
+        imp['desc_pct'] = 100 * imp['descontado'] / imp['lista']
+        imp['m_lista'] = 100 * (imp['lista'] - imp['costo']) / imp['lista']
+        imp['m_real'] = 100 * (imp['cobrado'] - imp['costo']) / imp['cobrado']
+        imp['por_ot'] = (imp['cobrado'] - imp['costo']) / imp['OT']
+        orden = imp.drop('Total').sort_values('OT', ascending=False).index.tolist() + ['Total']
+        imp = imp.loc[orden]
+        tabla_html(pd.DataFrame({
+            'Descuento': imp.index, 'OT': imp['OT'].map(miles), 'Precio de lista': imp['lista'].apply(clp),
+            'Cobrado': imp['cobrado'].apply(clp), 'Descontado': imp['descontado'].apply(clp),
+            'Descuento real': imp['desc_pct'].apply(pct), 'Margen a lista': imp['m_lista'].apply(pct),
+            'Margen real': imp['m_real'].apply(pct), 'Margen real por OT': imp['por_ot'].apply(clp),
+        }), con_total=True)
+        st.caption('"Sin descuento registrado" puede tener descuento real: son las rebajas sin código.')
+
+        # ---- Margen por línea: precio de lista vs realmente cobrado
+        base = kd.groupby('linea').agg(lista=('lista_neta', 'sum'), cobrado=('cobrado_neto', 'sum'),
+                                       costo=('costo', 'sum'), n=('ot', 'size'))
+        base = base[base['n'] >= 10].reindex([l for l in pr.LINEAS if l in base.index])
+        base['m_lista'] = 100 * (base['lista'] - base['costo']) / base['lista']
+        base['m_real'] = 100 * (base['cobrado'] - base['costo']) / base['cobrado']
+        base['desc_hoy'] = 100 * (1 - base['cobrado'] / base['lista'])
+
+        col1, col2 = st.columns(2, gap='medium')
+        with col1:
+            seccion('Margen por línea: a precio de lista vs realmente cobrado', f'{texto_k} · % sobre lo cobrado')
+            mb = pd.concat([base[['m_lista']].rename(columns={'m_lista': 'pct'}).assign(Precio='A precio de lista'),
+                            base[['m_real']].rename(columns={'m_real': 'pct'}).assign(Precio='Realmente cobrado')])
+            mb = mb.rename_axis('Línea').reset_index()
+            fig = px.bar(mb, x='Línea', y='pct', color='Precio', barmode='group',
+                         color_discrete_map={'A precio de lista': AZUL_SUAVE, 'Realmente cobrado': AZUL})
+            fig.update_traces(marker_line_width=0, hovertemplate='%{x}<br>%{y:.1f}%<extra>%{fullData.name}</extra>')
+            fig.update_layout(xaxis_title=None, yaxis_title='%')
+            mostrar(fig, 340)
+        with col2:
+            seccion('% de OT particulares con descuento', 'mes a mes, últimos 24 meses')
+            dm = ot_sala[ot_sala['fecha'] > fecha_max - pd.DateOffset(months=24)]
+            dm = dm.groupby('mes', as_index=False)['con_descuento'].mean()
+            dm['pct'] = 100 * dm['con_descuento']
+            linea_mensual(dm, 'pct', formato='%', alto=340, color=SERIES[1])
+
+        # ---- Simulador
+        seccion('Simulador: ¿cuánto descuento aguanta cada línea?',
+                'con los precios de lista y costos actuales del informe de costos')
+        col1, col2 = st.columns(2, gap='medium')
+        d_sim = col1.slider('Descuento a aplicar (%)', min_value=0, max_value=50, value=20, step=5)
+        meta_sim = col2.number_input('Margen directo mínimo que se quiere mantener (%)', min_value=0.0,
+                                     max_value=95.0, value=float(meta_md), step=1.0, key='meta_simulador')
+        filas = []
+        for linea, r in base.iterrows():
+            m_d = margen_con_descuento(r['lista'], r['costo'], d_sim)
+            d_max = descuento_maximo(r['lista'], r['costo'], meta_sim)
+            filas.append({
+                'Línea': linea,
+                'Margen sin descuento': pct(r['m_lista']),
+                f'Margen con {d_sim}% de descuento': pct(m_d),
+                'Estado': chip(estado_meta(m_d, meta_sim, True)),
+                f'Descuento máximo para {pct(meta_sim, 0)} de margen':
+                    pct(d_max) if d_max > 0 else 'ninguno (ya está bajo la meta)',
+                'Descuento real promedio hoy': pct(r['desc_hoy']),
+            })
+        tabla_html(pd.DataFrame(filas))
+
+        curva = []
+        for linea, r in base.iterrows():
+            for d in range(0, 51, 1):
+                curva.append({'Línea': linea, 'Descuento': d, 'Margen': margen_con_descuento(r['lista'], r['costo'], d)})
+        curva = pd.DataFrame(curva)
+        fig = px.line(curva, x='Descuento', y='Margen', color='Línea', color_discrete_map=COLOR_LINEA,
+                      category_orders={'Línea': pr.LINEAS})
+        fig.update_traces(line_width=2.5, hovertemplate='%{x}% de descuento<br>margen %{y:.1f}%<extra>%{fullData.name}</extra>')
+        fig.add_hline(y=meta_sim, line_color=GRIS, line_width=1, line_dash='dash',
+                      annotation_text=f'margen mínimo {pct(meta_sim, 0)}', annotation_position='bottom left')
+        fig.add_vline(x=d_sim, line_color=NARANJO, line_width=2,
+                      annotation_text=f'{d_sim}%', annotation_position='top right')
+        fig.update_layout(xaxis_title='% de descuento sobre el precio de lista', yaxis_title='margen directo (%)',
+                          xaxis_ticksuffix='%', yaxis_ticksuffix='%')
+        mostrar(fig, 380)
+        nota('<b>Cómo leer el simulador.</b> Cada línea muestra cómo cae el margen directo a medida que sube el descuento. '
+             'El descuento máximo es el punto donde la curva cruza el margen mínimo: '
+             '<i>1 − costo ÷ (precio de lista × (1 − margen mínimo))</i>. Hoy el descuento se aplica parejo a toda la OT, '
+             'así que una OT con armazón y cristales recibe el mismo % en ambos. No incluye gastos operacionales.')
 
 
 # =============================================================================
 # 12. Pestaña: Operaciones
 # =============================================================================
-with tabs[3]:
-    sin_fecha = 100 * s_act['fecha_entrega'].isna().mean() if not s_act.empty else np.nan
+with tabs[4]:
+    sin_fecha =100 * s_act['fecha_entrega'].isna().mean() if not s_act.empty else np.nan
     fila_kpi([
         tarjeta('Plazo de entrega (mediana)', f'{miles(lt_act)} días', variacion(lt_act, lt_ant), COMPARADO,
                 invertir=True, meta=semaforo('Plazo de entrega (mediana)')),
@@ -1179,8 +1310,8 @@ with tabs[3]:
 # =============================================================================
 # 13. Pestaña: Calidad de datos
 # =============================================================================
-with tabs[4]:
-    sin_or = 100 - der_act if not pd.isna(der_act) else np.nan
+with tabs[5]:
+    sin_or =100 - der_act if not pd.isna(der_act) else np.nan
     sin_costo = ((costos['venta'] > 0) & (costos['costo'] == 0)).sum() if not costos.empty else 0
     corregidos = (costos['arreglo'] != '').sum() if 'arreglo' in costos.columns else 0
     fila_kpi([

@@ -179,10 +179,11 @@ def limpiar_ot_sala(df):
     s['origen'], s['origen_tipo'] = limpiar_origen(df['ORIGEN'])
     s['total'] = a_numero(df['total']).fillna(0)           # con IVA
 
-    # Descuento: casi siempre es un %, a veces texto ('discapacidad', 'socios', 'desct10')
+    # Descuento: 'descT' NO es el %, es un CÓDIGO (8 = 10%, 11 = 20%, 12 = 30%...).
+    # A veces viene como texto ('discapacidad', 'socios'). El % real se calcula en solo_particular().
     s['con_descuento'] = df['descT'].notna()
-    d = df['descT'].astype(str).str.extract(r'(\d+)')[0].astype(float)
-    s['descuento_pct'] = d.where(d.between(1, 50))
+    s['codigo_descuento'] = df['descT'].apply(
+        lambda x: np.nan if pd.isna(x) else (str(int(x)) if isinstance(x, (int, float)) else sin_tildes(x)))
     s['forma_pago'] = forma_de_pago(columna(df, 'efectivo total'))
     s['estado'] = df['estado de ot'].apply(sin_tildes).fillna('SIN ESTADO')
 
@@ -343,7 +344,8 @@ def guardar_tablas(tablas, carpeta='data'):
 def leer_tabla(ruta, clave):
     # 'ruta' puede ser la ruta del .csv.gz o el archivo ya abierto (por ejemplo, desde un zip)
     df = pd.read_csv(ruta, low_memory=False, compression='gzip',
-                     dtype={'ot': 'object', 'folio': 'object', 'arreglo': 'object'})
+                     dtype={'ot': 'object', 'folio': 'object', 'arreglo': 'object',
+                            'codigo_descuento': 'object'})
     for col in FECHAS.get(clave, []):
         df[col] = pd.to_datetime(df[col], errors='coerce', format='mixed')
     for col in ('es_nc', 'costeable', 'con_descuento'):
@@ -361,13 +363,46 @@ def leer_tabla(ruta, clave):
 # ---------------------------------------------------------------------------
 def solo_particular(ventas, ot_sala, costos):
     # La OT define qué es particular. Las boletas y los costos se filtran por el número de OT.
+    # Además calcula el descuento REAL de cada OT y lo que realmente se cobró por cada producto.
     s = ot_sala[ot_sala['convenio'] == 'PARTICULAR'].copy() if not ot_sala.empty else ot_sala
     ots = set(s['ot'].dropna()) if not s.empty else set()
     v = ventas.copy()
     v['es_particular'] = v['ot'].isin(ots)
     k = costos[costos['ot'].isin(ots)].copy() if not costos.empty else costos
-    if not k.empty and not s.empty:
+    if s.empty:
+        return v, s, k
+    if 'codigo_descuento' not in s.columns:
+        s['codigo_descuento'] = np.nan
+
+    # 1. Descuento real de la OT = 1 - total cobrado / precio de lista (suma de productos del informe de costos)
+    if not k.empty:
+        lista = k[k['venta'] > 0].groupby('ot')['venta'].sum()
+        ultima = s.sort_values('fecha').drop_duplicates('ot', keep='last').set_index('ot')
+        razon = ultima['total'] / lista.reindex(ultima.index)
+        desc_ot = (100 * (1 - razon)).where(razon.between(0.2, 1.05)).clip(lower=0)
+    else:
+        lista, desc_ot = pd.Series(dtype=float), pd.Series(dtype=float)
+    s['precio_lista'] = s['ot'].map(lista)
+    s['descuento_real'] = s['ot'].map(desc_ot)
+
+    # 2. Equivalencia código -> % (mediana del descuento real de las OT con ese código, mínimo 3 OT)
+    con_dato = s.dropna(subset=['codigo_descuento', 'descuento_real'])
+    equivalencia = con_dato.groupby('codigo_descuento')['descuento_real'].agg(['median', 'size'])
+    equivalencia = equivalencia[equivalencia['size'] >= 3]['median'].round(0)
+
+    # 3. % de descuento de cada OT: el real si se puede calcular; si no, el del código
+    s['descuento_pct'] = np.where(s['con_descuento'] & s['descuento_real'].notna(), s['descuento_real'],
+                                  s['codigo_descuento'].map(equivalencia))
+    s['descuento_pct'] = pd.to_numeric(s['descuento_pct'], errors='coerce')
+    # Rebaja sin código: OT sin descuento registrado que igual se cobró al menos 2% bajo lista
+    s['rebaja_sin_codigo'] = ~s['con_descuento'] & (s['descuento_real'] >= 2)
+
+    # 4. Lo que realmente se cobró por cada producto (el descuento de la OT se reparte parejo)
+    if not k.empty:
         info = s.sort_values('fecha').drop_duplicates('ot', keep='last').set_index('ot')
         k['origen_tipo'] = k['ot'].map(info['origen_tipo'])
-        k['con_descuento'] = k['ot'].map(info['con_descuento'])
+        k['con_descuento'] = k['ot'].map(info['con_descuento']).fillna(False).astype(bool)
+        k['codigo_descuento'] = k['ot'].map(info['codigo_descuento'])
+        factor = 1 - k['ot'].map(desc_ot).fillna(0) / 100
+        k['venta_cobrada'] = k['venta'] * factor
     return v, s, k

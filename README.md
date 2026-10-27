@@ -12,7 +12,8 @@ con empresas quedan fuera. Las boletas y los costos se filtran según el número
 |---|---|
 | Resumen ejecutivo | KPIs con semáforo de metas, cascada del ingreso al margen, cuadro de metas, venta mensual y hallazgos clave. Botón de reporte en Excel |
 | Resultados por línea | Estado de resultados por línea de producto y rentabilidad real del informe de costos (familia, tipo de lente, derivador, descuento, proveedor, productos) |
-| Comercial | Boletas, ticket, tendencia, OT y ticket por mes, **derivación desde el Centro Médico**, forma de pago, vendedoras y descuentos |
+| Comercial | Boletas, ticket, tendencia, OT y ticket por mes, **derivación desde el Centro Médico**, forma de pago y vendedoras |
+| Descuentos | Descuento real por código, monto descontado, margen a precio de lista vs cobrado y **simulador** del descuento máximo por línea |
 | Operaciones | Plazos de entrega, entregas fuera de plazo, OT por día de la semana y desempeño por vendedora |
 | Calidad de datos | OT mal registradas, auditoría para TI, trazabilidad de la OT y descarga de tablas |
 
