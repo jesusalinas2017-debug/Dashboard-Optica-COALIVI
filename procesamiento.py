@@ -1,7 +1,8 @@
 # procesamiento.py
-# Limpieza de las planillas de la Óptica COALIVI.
-# Lo usan el notebook de Colab (para generar la carpeta data/) y la app de Streamlit
-# (cuando alguien sube planillas nuevas desde la barra lateral).
+# Limpieza de las planillas de la sala de ventas de la Óptica COALIVI (foco: venta particular).
+# Lo usan:
+#   - generar_datos.py  -> para crear la carpeta data/ desde las planillas originales
+#   - app.py            -> cuando alguien sube planillas nuevas desde la barra lateral
 # MDF Consulting · 2026
 
 import io
@@ -15,46 +16,33 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # 1. Catálogo de bases
 # ---------------------------------------------------------------------------
-# Para cada base: palabras que aparecen en el nombre del archivo original,
-# hoja que se lee y fila del encabezado (header de pandas).
+# Para cada base: palabras que pueden aparecer en el nombre del archivo, hoja y fila del encabezado
 BASES = {
-    'ventas':      {'claves': ['CONSOLIDADO VENTAS', 'NUBOX'],
-                    'hoja': 0, 'header': 0,
-                    'nombre': 'Ventas facturadas (Nubox)'},
-    'ot_sala':     {'claves': ['SALA DE VENTA'],
-                    'hoja': 0, 'header': 0,
-                    'nombre': 'OT sala de venta'},
-    'ot_convenio': {'claves': ['APPS CONVENIO', 'OPTICA CONVENIO'],
-                    'hoja': 0, 'header': 0,
-                    'nombre': 'OT convenio institucional'},
-    'pedidos':     {'claves': ['SOLICITUD_CRISTALES', 'CENTRALIZACION CRISTALES'],
-                    'hoja': 0, 'header': 0,
-                    'nombre': 'Pedidos de cristales a proveedor'},
-    'costos':      {'claves': ['INFORME_COSTOS'],
-                    'hoja': 'informe_costos_analitico_v3_con', 'header': 0,
-                    'nombre': 'Informe de costos'},
-    'inventario':  {'claves': ['INVENTARIO'],
-                    'hoja': 0, 'header': 0,
-                    'nombre': 'Inventario de armazones'},
-    'convenios':   {'claves': ['CONVENIOS COALIVI'],
-                    'hoja': None, 'header': 2,      # None = todas las hojas
-                    'nombre': 'Cartera de convenios'},
+    'ventas':  {'claves': ['CONSOLIDADO VENTAS'], 'hoja': 0, 'header': 0,
+                'nombre': 'Boletas de la sala (Nubox)'},
+    'ot_sala': {'claves': ['SALA DE VENTAS PARTICULAR', 'OPTICA SALA DE VENTA'], 'hoja': 0, 'header': 0,
+                'nombre': 'OT de la sala de ventas'},
+    'costos':  {'claves': ['INFORME_COSTOS_SALA', 'INFORME COSTOS SALA', 'INFORME_COSTOS_ANALITICO'], 'hoja': 0, 'header': 0,
+                'nombre': 'Informe de costos de la sala'},
 }
+
+# Planillas que se reconocen pero quedan fuera: licitaciones y convenio institucional (fuera del foco particular)
+EXCLUIDAS = ['APPS CONVENIO', 'COSTOS_CONVENIO', 'COSTOS CONVENIO']
 
 # Columnas de fecha de cada tabla limpia (para leer los .csv.gz con el tipo correcto)
 FECHAS = {
     'ventas': ['fecha'],
     'ot_sala': ['fecha', 'fecha_prometida', 'fecha_entrega'],
-    'ot_convenio': ['fecha'],
-    'pedidos': ['fecha'],
     'costos': ['fecha'],
-    'inventario': [],
-    'convenios': [],
 }
 
-MESES_ES = {'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
-            'julio': 7, 'agosto': 8, 'septiembre': 9, 'setiembre': 9, 'octubre': 10,
-            'noviembre': 11, 'diciembre': 12}
+# Líneas de producto para el estado de resultados
+LINEAS = ['Cristales', 'Armazones', 'Lentes de sol', 'Accesorios y líquidos', 'Reparaciones y otros']
+TIPO_A_LINEA = {'CRISTALES': 'Cristales', 'ARMAZON': 'Armazones', 'GAFA': 'Lentes de sol',
+                'ACCESORIO': 'Accesorios y líquidos', 'LIQUIDO': 'Accesorios y líquidos'}
+# Familias del informe de costos -> líneas
+FAMILIA_A_LINEA = {'CRISTAL': 'Cristales', 'ARMAZON': 'Armazones', 'GAFAS': 'Lentes de sol',
+                   'ACCESORIO': 'Accesorios y líquidos'}
 
 
 # ---------------------------------------------------------------------------
@@ -78,14 +66,15 @@ def a_numero(serie):
 
 
 def a_fecha(serie):
-    # Fechas como texto o datetime; las imposibles quedan vacías
-    fecha = pd.to_datetime(serie, errors='coerce')
+    # Los datos parten en 2024: fechas anteriores o imposibles (año 202, futuras) quedan vacías
+    # Se deja solo el día (sin hora) para que todas las fechas se guarden con el mismo formato
+    fecha = pd.to_datetime(serie, errors='coerce').dt.normalize()
     hoy = pd.Timestamp.today().normalize()
-    return fecha.where(fecha.between('2015-01-01', hoy))
+    return fecha.where(fecha.between('2024-01-01', hoy))
 
 
 def extraer_ot(serie):
-    # La OT viene mezclada con texto ('121053 EFECT MARITZ'): rescatamos el número
+    # La OT viene mezclada con texto ('121053 EFECT MARITZ') o como 122732.0: rescatamos el número
     return serie.astype(str).str.extract(r'(\d{5,7})')[0]
 
 
@@ -99,16 +88,17 @@ def agregar_periodo(df, col='fecha'):
 def nombre_vendedora(serie):
     # Unifica nombres de vendedoras ('JUANPABLO' y 'JUAN PABLO' son la misma)
     s = serie.apply(sin_tildes).replace({'JUANPABLO': 'JUAN PABLO', 'SIN VENDEDORA': np.nan})
-    return s.fillna('Sin registro').str.title()
+    return s.str.title().fillna('Sin registro')
 
 
-# Líneas de producto para el estado de resultados (según el 'Tipo' de la boleta)
-LINEAS = ['Cristales', 'Armazones', 'Lentes de sol', 'Accesorios y líquidos', 'Reparaciones y otros']
-TIPO_A_LINEA = {'CRISTALES': 'Cristales', 'ARMAZON': 'Armazones', 'GAFA': 'Lentes de sol',
-                'ACCESORIO': 'Accesorios y líquidos', 'LIQUIDO': 'Accesorios y líquidos'}
-# Familias del informe de costos -> líneas
-FAMILIA_A_LINEA = {'CRISTAL': 'Cristales', 'ARMAZON': 'Armazones', 'GAFAS': 'Lentes de sol',
-                   'ACCESORIO': 'Accesorios y líquidos'}
+def forma_de_pago(serie):
+    # La forma de pago viene escrita de muchas formas
+    p = serie.apply(sin_tildes)
+    return np.select(
+        [p.str.contains('DEBITO', na=False), p.str.contains('EFECTIVO', na=False),
+         p.str.contains('TRANSFER', na=False), p.str.contains('CREDITO', na=False)],
+        ['Crédito / Débito', 'Efectivo', 'Transferencia', 'Crédito directo'],
+        default='Otro / sin dato')
 
 
 def linea_producto(tipo):
@@ -117,13 +107,32 @@ def linea_producto(tipo):
 
 
 def segmento(convenio):
-    # Agrupa los convenios de la OT de sala en 3 segmentos comerciales
+    # Agrupa los "convenios" de la OT de sala en 3 segmentos (el dashboard muestra solo Particular)
     c = str(convenio)
     if c in ('PARTICULAR', 'NAN', ''):
         return 'Particular'
-    if re.search(r'OPERATIVO EMPRESA|CONVENIO |MUTUAL|GENDARM|IST|FUNCIONARIO|SERMECAP', c):
-        return 'Empresas y convenios'
-    return 'Público / social'
+    if c.startswith(('DAS', 'SSC', 'COSADES')):
+        return 'Licitación (DAS/SSC/COSADES)'
+    return 'Convenios y operativos'
+
+
+def limpiar_origen(serie):
+    # ORIGEN = profesional que derivó al paciente. Devuelve (nombre, tipo de profesional)
+    o = serie.apply(sin_tildes).replace({'NO REGISTRA': np.nan, 'NAN': np.nan, 'OTROS': np.nan})
+    prefijo = pd.Series(np.select([o.str.match(r'^DRA?\.', na=False), o.str.match(r'^TEC\.', na=False)],
+                                  ['Oftalmólogo/a', 'Tecnólogo/a médico'], default='Otro'), index=o.index)
+    nombre = o.str.replace(r'^(DRA?\.|TEC\.|PROF\.)\s*', '', regex=True).str.strip()
+    # Un mismo profesional aparece a veces con 'TEC.' y otras sin título: le asignamos el tipo conocido
+    con_titulo = prefijo != 'Otro'
+    tipo_conocido = dict(zip(nombre[con_titulo], prefijo[con_titulo]))
+    tipo = nombre.map(tipo_conocido).fillna('Otro')
+    tipo[nombre.isna()] = 'Sin registro'
+    return nombre.str.title().fillna('Sin registro'), tipo
+
+
+def columna(df, nombre):
+    # Devuelve la columna si existe; si no, una columna vacía (para columnas opcionales)
+    return df[nombre] if nombre in df.columns else pd.Series(np.nan, index=df.index)
 
 
 # ---------------------------------------------------------------------------
@@ -135,20 +144,14 @@ def limpiar_ventas(df):
     v['folio'] = df['Folio']
     v['producto'] = df['Producto'].fillna('').astype(str)
     v['tipo'] = df['Tipo'].fillna('OTRO').astype(str).str.strip()
+    v['linea'] = v['tipo'].apply(linea_producto)
     v['cantidad'] = a_numero(df['Cantidad'])
     v['precio'] = a_numero(df['Precio'])
-    v['total'] = a_numero(df['Total'])
+    v['total'] = a_numero(df['Total'])                     # con IVA
     v['vendedora'] = nombre_vendedora(df['Codigo Vendedor'])
+    v['forma_pago'] = forma_de_pago(df['Forma de pago'])
 
-    # Forma de pago: viene escrita de varias formas
-    pago = df['Forma de pago'].apply(sin_tildes)
-    v['forma_pago'] = np.select(
-        [pago.str.contains('DEBITO', na=False), pago.str.contains('EFECTIVO', na=False),
-         pago.str.contains('TRANSFER', na=False), pago.str.contains('CREDITO', na=False)],
-        ['Crédito / Débito', 'Efectivo', 'Transferencia', 'Crédito directo'],
-        default='Otro / sin dato')
-
-    # Estado de registro de la OT en el sistema
+    # Estado de registro de la OT en el sistema (9 formas de escribir 3 estados)
     estado = df['ESTADO OT SISTEMA'].apply(sin_tildes)
     v['estado_ot'] = np.select(
         [estado.str.contains('MAL', na=False), estado.str.contains('NO REG', na=False)],
@@ -166,22 +169,21 @@ def limpiar_ventas(df):
 
 
 def limpiar_ot_sala(df):
+    df = df.drop_duplicates(subset=['OT', 'FECHA OT', 'total', 'VENDEDORA', 'CONVENIO'])
     s = pd.DataFrame()
     s['ot'] = extraer_ot(df['OT'])
     s['fecha'] = a_fecha(df['FECHA OT'])
     s['vendedora'] = nombre_vendedora(df['VENDEDORA'])
     s['convenio'] = df['CONVENIO'].apply(sin_tildes).fillna('PARTICULAR')
     s['segmento'] = s['convenio'].apply(segmento)
+    s['origen'], s['origen_tipo'] = limpiar_origen(df['ORIGEN'])
+    s['total'] = a_numero(df['total']).fillna(0)           # con IVA
 
-    # Origen = profesional que deriva al paciente
-    origen = df['ORIGEN'].apply(sin_tildes)
-    origen = origen.str.replace(r'^TEC\.?\s*', '', regex=True)
-    origen = origen.str.replace(r'^(DRA?)\.\s*', r'\1. ', regex=True)
-    s['origen'] = origen.replace({'NO REGISTRA': np.nan, 'NAN': np.nan}).fillna('Sin registro')
-
-    edad = a_numero(df['EDAD'])
-    s['edad'] = edad.where(edad.between(1, 110))
-    s['total'] = a_numero(df['total']).fillna(0)
+    # Descuento: casi siempre es un %, a veces texto ('discapacidad', 'socios', 'desct10')
+    s['con_descuento'] = df['descT'].notna()
+    d = df['descT'].astype(str).str.extract(r'(\d+)')[0].astype(float)
+    s['descuento_pct'] = d.where(d.between(1, 50))
+    s['forma_pago'] = forma_de_pago(columna(df, 'efectivo total'))
     s['estado'] = df['estado de ot'].apply(sin_tildes).fillna('SIN ESTADO')
 
     # Plazos: fecha prometida al cliente vs fecha real de entrega
@@ -195,143 +197,67 @@ def limpiar_ot_sala(df):
     return agregar_periodo(s)
 
 
-def limpiar_ot_convenio(df):
-    c = pd.DataFrame()
-    c['ot'] = extraer_ot(df['OT'])
-    c['fecha'] = a_fecha(df['FECHA OT'])
-    c['vendedora'] = nombre_vendedora(df['VENDEDORA'])
-    c['contraparte'] = df['CONVENIO'].apply(sin_tildes).fillna('SIN DATO')
-    c['centro_origen'] = df['CENTRO DE ORIGEN'].astype('object').fillna('Sin registro').astype(str).str.strip()
-    edad = a_numero(df['EDAD'])
-    c['edad'] = edad.where(edad.between(1, 110))
-    c = c.dropna(subset=['fecha'])
-    return agregar_periodo(c)
-
-
-def limpiar_pedidos(df):
-    p = pd.DataFrame()
-
-    # La fecha viene como texto: '11 de junio de 2026'
-    partes = df['FECHA_PEDIDO'].astype(str).str.lower().str.extract(
-        r'(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})')
-    texto = partes[2] + '-' + partes[1].map(MESES_ES).astype('Int64').astype(str) + '-' + partes[0]
-    p['fecha'] = a_fecha(pd.to_datetime(texto, format='%Y-%m-%d', errors='coerce'))
-
-    prov = df['PROVEEDOR'].apply(sin_tildes).fillna('SIN DATO')
-    prov = prov.str.replace(r'MERCAVIS.*', 'MERCAVISION', regex=True)
-    prov = prov.str.replace(r'PEDIDOS? URGENTES?', 'PEDIDO URGENTE', regex=True)
-    p['proveedor'] = prov
-    p['urgente'] = prov.eq('PEDIDO URGENTE')
-
-    cristal = df['CRISTAL'].apply(sin_tildes)
-    p['cristal'] = cristal.str.replace(r'[^A-Z0-9 .+/]', '', regex=True).str.strip()
-    p['ot'] = extraer_ot(df['OT'])
-
-    p = p.dropna(subset=['fecha'])
-    return agregar_periodo(p)
-
-
 def limpiar_costos(df):
+    # Una fila = un producto de una OT (armazón, cada cristal, gafa, accesorio)
+    df = df.drop_duplicates()
     k = pd.DataFrame()
     k['fecha'] = a_fecha(df['Fecha'])
     k['ot'] = extraer_ot(df['OT'])
     k['vendedora'] = nombre_vendedora(df['Vendedora'])
     k['familia'] = df['Familia'].fillna('Sin familia')
+    k['linea'] = k['familia'].apply(lambda f: FAMILIA_A_LINEA.get(sin_tildes(f), 'Reparaciones y otros'))
     k['tipo'] = df['Tipo']
-    k['producto'] = df['Producto Analítico'].fillna(df['Producto']).astype(str)
-    k['venta'] = a_numero(df['Pventa Total']).fillna(0)
-    k['costo'] = a_numero(df['Pcosto Total']).fillna(0)
-    k['utilidad'] = k['venta'] - k['costo']
+    k['uso'] = columna(df, 'Uso').fillna('Sin dato')
+    k['tipo_lente'] = columna(df, 'V5_TIPO_LENTE_MATCH').fillna('Sin dato')
+    k['producto'] = columna(df, 'Producto Analítico').fillna(df['Producto']).astype(str)
+    k['producto'] = k['producto'].where(~k['producto'].str.fullmatch(r'\s*\d*\s*'), 'Sin nombre comercial')
+    prov = df['PROVEEDOR'].apply(sin_tildes)
+    k['proveedor'] = prov.str.replace(r'MERCAVIS.*', 'MERCAVISION', regex=True).fillna('Sin dato')
+
+    cant = a_numero(df['Cantidad'])
+    precio = a_numero(df['Pventa Unitario'])
+    costo_unit = a_numero(df['Pcosto Unitario'])
+
+    # Arreglo 1: cantidad y precio invertidos (gafas con cantidad = 119.900 y precio = 1)
+    invertido = (cant > 1000) & (precio <= 1)
+    precio = precio.where(~invertido, cant)
+    cant = cant.where(~invertido, 1)
+
+    # Arreglo 2: separador de miles mal leído (14.99 -> 14.990)
+    mal_miles = (precio > 0) & (precio < 200)
+    precio = precio.where(~mal_miles, precio * 1000)
+
+    k['cantidad'] = cant
+    k['venta'] = precio * cant                             # con IVA
+    k['arreglo'] = np.select([invertido, mal_miles], ['Cantidad y precio invertidos', 'Separador de miles'], default='')
+
+    # Arreglo 3: costo (neto). Cristales: costo nuevo con listas de proveedores (V5, preliminar) si existe
+    costo_informe = (costo_unit * cant).fillna(0)
+    costo_v5 = a_numero(columna(df, 'V5_COSTO_TOTAL_NUEVO'))
+    usa_v5 = k['familia'].eq('Cristal') & costo_v5.notna()
+    k['costo'] = np.where(usa_v5, costo_v5, costo_informe)
+    k['fuente_costo'] = np.select([usa_v5, costo_informe > 0],
+                                  ['Lista proveedores V5 (preliminar)', 'Informe de costos'], default='Sin costo')
     k['costeable'] = (k['venta'] > 0) & (k['costo'] > 0)
-    # Costo "supuesto": cuando el costo es exactamente el 40% del precio
-    k['costo_supuesto'] = k['costeable'] & ((k['costo'] / k['venta'].where(k['venta'] > 0)).round(3) == 0.4)
-    k['costo_match'] = df['Costo Match'].fillna('Sin dato')
-    k['proveedor'] = df['PROVEEDOR'].apply(sin_tildes).fillna('SIN DATO')
     k = k.dropna(subset=['fecha'])
     return agregar_periodo(k)
 
 
-def limpiar_inventario(df):
-    i = pd.DataFrame()
-    i['codigo'] = df['CODIGO'].apply(lambda x: '' if pd.isna(x) else str(int(x)) if isinstance(x, float) else str(x))
-    i['nombre'] = df['NOMBRE ITEM']
-    i['tipo_item'] = df['TIPO ITEM'].apply(sin_tildes)
-    i['marca'] = df['MARCA'].apply(sin_tildes)
-    i['material'] = df['MATERIAL'].apply(sin_tildes)
-    i['proveedor'] = df['PROVEEDOR'].apply(sin_tildes).fillna('SIN DATO')
-    i['linea'] = df['ADICIONAL'].apply(sin_tildes).fillna('SIN DATO')
-    i['saldo_sala'] = a_numero(df['S.VENTAS'])
-    i['p_compra'] = a_numero(df['P.COMPRA'])
-    # Hay dos columnas P.VENTA: pandas deja la primera como 'P.VENTA'
-    i['p_venta'] = a_numero(df['P.VENTA'])
-    valido = (i['p_compra'] > 0) & (i['p_venta'] > 0)
-    i['margen_pct'] = np.where(valido, 100 * (i['p_venta'] - i['p_compra']) / i['p_venta'], np.nan)
-    return i
-
-
-def limpiar_convenios(hojas):
-    # 'hojas' es un diccionario {nombre_hoja: DataFrame} con las 4 categorías
-    categorias = {'EMPRESA': 'Empresa', 'MUNICIPAL': 'Municipalidad',
-                  'INSTITUCION': 'Institución', 'CORPORACION': 'Corporación'}
-    tablas = []
-    for hoja, d in hojas.items():
-        d = d.dropna(how='all').copy()
-        d.columns = [str(x).strip() for x in d.columns]
-        hoja_n = sin_tildes(hoja)
-        categoria = next((v for k, v in categorias.items() if k in hoja_n), hoja.strip().title())
-
-        # La columna con el nombre de la organización cambia de nombre en cada hoja
-        col_nombre = [x for x in d.columns
-                      if sin_tildes(x).startswith(('EMPRESA', 'MUNICIPALIDAD', 'INSTITUCION',
-                                                   'COORPORACION', 'CORPORACION'))]
-        if not col_nombre:
-            continue
-        t = pd.DataFrame()
-        t['organizacion'] = d[col_nombre[0]].astype('object')
-        t['categoria'] = categoria
-        t['anio_firma'] = a_numero(d.get('Fecha convenio', pd.Series(index=d.index, dtype=float)))
-        t['ultima_actualizacion'] = d.get('Ultima actualización', pd.Series(index=d.index, dtype=object)).astype('object')
-        t['estado'] = d.get('Estado', pd.Series(index=d.index, dtype=object)).astype('object').fillna('Sin estado')
-        t['tipo_gestion'] = d.get('Tipo de Gestión', pd.Series(index=d.index, dtype=object)).astype('object').fillna('Sin dato')
-        tablas.append(t)
-
-    conv = pd.concat(tablas, ignore_index=True)
-    conv = conv.dropna(subset=['organizacion'])
-    conv['organizacion'] = conv['organizacion'].astype(str).str.strip()
-    conv['ultima_actualizacion'] = conv['ultima_actualizacion'].fillna('').astype(str).replace({'nan': ''})
-    return conv
-
-
-LIMPIEZA = {
-    'ventas': limpiar_ventas,
-    'ot_sala': limpiar_ot_sala,
-    'ot_convenio': limpiar_ot_convenio,
-    'pedidos': limpiar_pedidos,
-    'costos': limpiar_costos,
-    'inventario': limpiar_inventario,
-    'convenios': limpiar_convenios,
-}
+LIMPIEZA = {'ventas': limpiar_ventas, 'ot_sala': limpiar_ot_sala, 'costos': limpiar_costos}
 
 
 # ---------------------------------------------------------------------------
 # 4. Identificar, leer y procesar un archivo original
 # ---------------------------------------------------------------------------
-# Columnas que necesita cada base. Sirven para dos cosas:
-#   1) reconocer la planilla por su contenido, aunque le cambien el nombre al archivo
-#   2) avisar con claridad si a la planilla le falta alguna columna
+# Columnas que necesita cada base: sirven para reconocer la planilla por su contenido
+# y para avisar con claridad si le falta alguna columna
 COLUMNAS = {
     'ventas': ['Fecha Emision', 'Folio', 'Producto', 'Tipo', 'Cantidad', 'Precio', 'Total',
-               'Codigo Vendedor', 'Forma de pago', 'ESTADO OT SISTEMA', 'nota de credito',
-               'ot no registradas'],
-    'ot_sala': ['OT', 'FECHA OT', 'VENDEDORA', 'CONVENIO', 'ORIGEN', 'EDAD', 'total',
+               'Codigo Vendedor', 'Forma de pago', 'ESTADO OT SISTEMA', 'nota de credito', 'ot no registradas'],
+    'ot_sala': ['OT', 'FECHA OT', 'VENDEDORA', 'CONVENIO', 'ORIGEN', 'total', 'descT',
                 'estado de ot', 'Fecha de entrega', 'FECHA ENTREGA'],
-    'ot_convenio': ['OT', 'FECHA OT', 'VENDEDORA', 'CONVENIO', 'CENTRO DE ORIGEN', 'EDAD'],
-    'pedidos': ['FECHA_PEDIDO', 'PROVEEDOR', 'CRISTAL', 'OT'],
-    'costos': ['Fecha', 'OT', 'Vendedora', 'Familia', 'Tipo', 'Producto', 'Producto Analítico',
-               'Pventa Total', 'Pcosto Total', 'Costo Match', 'PROVEEDOR'],
-    'inventario': ['CODIGO', 'NOMBRE ITEM', 'TIPO ITEM', 'MARCA', 'MATERIAL', 'PROVEEDOR',
-                   'ADICIONAL', 'S.VENTAS', 'P.COMPRA', 'P.VENTA'],
-    'convenios': ['Fecha convenio', 'Estado'],
+    'costos': ['Fecha', 'OT', 'Vendedora', 'Familia', 'Tipo', 'Producto', 'Cantidad',
+               'Pventa Unitario', 'Pcosto Unitario', 'PROVEEDOR'],
 }
 
 
@@ -344,14 +270,20 @@ def _abrir(archivo):
     return archivo
 
 
+def leer_excel(archivo, **kwargs):
+    # calamine es mucho más rápido; si no está instalado se usa openpyxl
+    try:
+        return pd.read_excel(_abrir(archivo), engine='calamine', **kwargs)
+    except Exception:
+        return pd.read_excel(_abrir(archivo), **kwargs)
+
+
 def _faltantes(columnas, clave):
-    # Columnas requeridas que no están (se compara sin tildes ni mayúsculas)
     presentes = {sin_tildes(c) for c in columnas}
     return [c for c in COLUMNAS[clave] if sin_tildes(c) not in presentes]
 
 
 def identificar_por_nombre(nombre_archivo):
-    # Devuelve la clave de la base según palabras del nombre del archivo (o None)
     n = sin_tildes(nombre_archivo)
     for clave, info in BASES.items():
         if any(palabra in n for palabra in info['claves']):
@@ -360,26 +292,17 @@ def identificar_por_nombre(nombre_archivo):
 
 
 def identificar_por_columnas(archivo):
-    # Lee solo los encabezados de la PRIMERA hoja y ve con qué base calzan las columnas.
-    # Se prueba el encabezado en la fila 1 y en la fila 3 (Convenios COALIVI parte en la fila 3).
-    # Devuelve la base con más columnas encontradas, si tiene al menos el 60% de ellas (o None).
+    # Ve con qué base calzan los encabezados de la primera hoja (al menos el 80% de las columnas)
+    try:
+        columnas = leer_excel(archivo, sheet_name=0, nrows=0).columns
+    except Exception:
+        return None
     mejor, mejor_pct = None, 0
-    for fila_encabezado in (0, 2):
-        try:
-            columnas = pd.read_excel(_abrir(archivo), sheet_name=0, header=fila_encabezado, nrows=0).columns
-        except Exception:
-            return None
-        for clave, requeridas in COLUMNAS.items():
-            pct = 1 - len(_faltantes(columnas, clave)) / len(requeridas)
-            # Si empatan, gana la que exige más columnas (la más específica)
-            if (pct, len(requeridas)) > (mejor_pct, len(COLUMNAS.get(mejor, []))):
-                mejor, mejor_pct = clave, pct
-    return mejor if mejor_pct >= 0.6 else None
-
-
-def identificar(archivo, nombre_archivo):
-    # Primero por el nombre del archivo (rápido); si no se reconoce, por sus columnas
-    return identificar_por_nombre(nombre_archivo) or identificar_por_columnas(archivo)
+    for clave in COLUMNAS:
+        p = 1 - len(_faltantes(columnas, clave)) / len(COLUMNAS[clave])
+        if p > mejor_pct:
+            mejor, mejor_pct = clave, p
+    return mejor if mejor_pct >= 0.8 else None
 
 
 def normalizar_columnas(df, clave):
@@ -390,31 +313,17 @@ def normalizar_columnas(df, clave):
     return df
 
 
-def leer_original(archivo, clave):
-    info = BASES[clave]
-    hoja = info['hoja']
-    if isinstance(hoja, str):
-        # Si la hoja con ese nombre no existe, se usa la primera
-        hojas = pd.ExcelFile(_abrir(archivo)).sheet_names
-        hoja = hoja if hoja in hojas else 0
-    return pd.read_excel(_abrir(archivo), sheet_name=hoja, header=info['header'])
-
-
 def procesar_archivo(archivo, nombre_archivo):
     # Reconoce, lee, revisa y limpia un archivo original. Devuelve (clave, tabla_limpia)
-    clave = identificar(archivo, nombre_archivo)
+    n = sin_tildes(nombre_archivo)
+    if any(x in n for x in EXCLUIDAS):
+        raise ValueError('es una planilla de convenio / licitación: queda fuera del foco de venta particular.')
+    clave = identificar_por_nombre(nombre_archivo) or identificar_por_columnas(archivo)
     if clave is None:
-        raise ValueError('no corresponde a ninguna base del dashboard (ni por su nombre ni por sus '
-                         'columnas), se ignoró.')
-    bruto = leer_original(archivo, clave)
-
-    # Revisar que estén todas las columnas antes de limpiar
-    if isinstance(bruto, dict):                       # convenios: varias hojas
-        bruto = {hoja: normalizar_columnas(d, clave) for hoja, d in bruto.items()}
-        faltan = _faltantes(next(iter(bruto.values())).columns, clave) if bruto else COLUMNAS[clave]
-    else:
-        bruto = normalizar_columnas(bruto, clave)
-        faltan = _faltantes(bruto.columns, clave)
+        raise ValueError('no corresponde a ninguna base del dashboard (ni por su nombre ni por sus columnas).')
+    bruto = normalizar_columnas(leer_excel(archivo, sheet_name=BASES[clave]['hoja'],
+                                           header=BASES[clave]['header']), clave)
+    faltan = _faltantes(bruto.columns, clave)
     if faltan:
         raise ValueError(f'parece ser la planilla de "{BASES[clave]["nombre"]}", pero le faltan las '
                          f'columnas: {", ".join(faltan)}. Revisar con TI si cambiaron de nombre.')
@@ -434,13 +343,31 @@ def guardar_tablas(tablas, carpeta='data'):
 def leer_tabla(ruta, clave):
     # 'ruta' puede ser la ruta del .csv.gz o el archivo ya abierto (por ejemplo, desde un zip)
     df = pd.read_csv(ruta, low_memory=False, compression='gzip',
-                     dtype={'ot': 'object', 'codigo': 'object', 'folio': 'object'})
-    # Fechas y verdadero/falso vuelven como texto desde el CSV: se convierten
+                     dtype={'ot': 'object', 'folio': 'object', 'arreglo': 'object'})
     for col in FECHAS.get(clave, []):
-        df[col] = pd.to_datetime(df[col], errors='coerce')
-    for col in ('es_nc', 'costeable', 'costo_supuesto', 'urgente'):
+        df[col] = pd.to_datetime(df[col], errors='coerce', format='mixed')
+    for col in ('es_nc', 'costeable', 'con_descuento'):
         if col in df.columns:
             df[col] = df[col].astype(str).str.lower().eq('true')
+    if 'arreglo' in df.columns:
+        df['arreglo'] = df['arreglo'].fillna('')
     if 'fecha' in df.columns:
         df = agregar_periodo(df)
     return df
+
+
+# ---------------------------------------------------------------------------
+# 6. Filtro a venta particular (lo usa la app)
+# ---------------------------------------------------------------------------
+def solo_particular(ventas, ot_sala, costos):
+    # La OT define qué es particular. Las boletas y los costos se filtran por el número de OT.
+    s = ot_sala[ot_sala['convenio'] == 'PARTICULAR'].copy() if not ot_sala.empty else ot_sala
+    ots = set(s['ot'].dropna()) if not s.empty else set()
+    v = ventas.copy()
+    v['es_particular'] = v['ot'].isin(ots)
+    k = costos[costos['ot'].isin(ots)].copy() if not costos.empty else costos
+    if not k.empty and not s.empty:
+        info = s.sort_values('fecha').drop_duplicates('ot', keep='last').set_index('ot')
+        k['origen_tipo'] = k['ot'].map(info['origen_tipo'])
+        k['con_descuento'] = k['ot'].map(info['con_descuento'])
+    return v, s, k
