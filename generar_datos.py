@@ -8,6 +8,7 @@
 #   - CONSOLIDADO VENTAS ÓPTICA Y OT + BOLETAS_.xlsx
 #   - OT APPS FINAL - Sala de ventas particular.xlsx
 #   - informe_costos_Sala_ventas__particulaes_16-10-2026.xlsx
+#   - Estado_de_Resultados_Comparativo_... OPTICA.xlsx (uno por año: se juntan todos en eerr.csv.gz)
 # Las planillas de convenio / licitaciones se saltan (fuera del foco particular).
 
 import os
@@ -27,7 +28,7 @@ for nombre in sorted(os.listdir(carpeta)):
     except ValueError as aviso:
         print(f'(se salta) {nombre}: {aviso}')
         continue
-    tablas[clave] = tabla
+    tablas[clave] = pr.unir_tablas(clave, tablas.get(clave), tabla)   # los EERR de varios años se juntan
     print(f'OK  {pr.BASES[clave]["nombre"]:32s} {len(tabla):>8,} filas  <- {nombre}')
 
 faltan = [c for c in pr.BASES if c not in tablas]

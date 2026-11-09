@@ -11,14 +11,30 @@ con empresas quedan fuera. Las boletas y los costos se filtran según el número
 | Pestaña | Qué muestra |
 |---|---|
 | Resumen ejecutivo | KPIs con semáforo de metas, cascada del ingreso al margen, cuadro de metas, venta mensual y hallazgos clave. Botón de reporte en Excel |
-| Resultados por línea | Estado de resultados por línea de producto y rentabilidad real del informe de costos (familia, tipo de lente, derivador, descuento, proveedor, productos) |
+| Resultados por línea | Estado de resultados por línea de producto (con gastos operacionales reales) y rentabilidad real del informe de costos (familia, tipo de lente, derivador, descuento, proveedor, productos) |
+| EERR contable | Estado de resultados contable de **toda la óptica** (incluye licitaciones): comparativo por año y mismo tramo, ingresos por tipo de venta, gastos por categoría, hallazgos y cuadratura con las boletas |
 | Comercial | Boletas, ticket, tendencia, OT y ticket por mes, **derivación desde el Centro Médico**, forma de pago y vendedoras |
 | Descuentos | Descuento real por código, monto descontado, margen a precio de lista vs cobrado y **simulador** del descuento máximo por línea |
 | Operaciones | Plazos de entrega, entregas fuera de plazo, OT por día de la semana y desempeño por vendedora |
 | Calidad de datos | OT mal registradas, auditoría para TI, trazabilidad de la OT y descarga de tablas |
 
-La barra lateral tiene el período, las **metas** (editables) y los **gastos operacionales**, que están en 0 hasta
-que COALIVI entregue las cifras. Mientras estén en 0, el dashboard llega hasta el margen directo.
+La barra lateral tiene el período, las **metas** (editables) y los **gastos operacionales**.
+
+### Cómo se calculan los gastos operacionales
+
+- Vienen de los **estados de resultados contables de la óptica** (`Estado_de_Resultados_Comparativo_..._OPTICA.xlsx`,
+  uno por año). Se suman **todas** las subcuentas (la planilla de 2026 omite finiquitos y encomiendas en su total).
+- Se excluyen los **insumos** (ya están en el costo directo de cada línea) y, por defecto, los **finiquitos**
+  (no recurrentes; se pueden incluir en la barra lateral).
+- Los gastos son de toda la óptica, así que se **asignan a la venta particular** según su peso en los ingresos:
+  venta particular del dashboard (boletas sin IVA) ÷ ingresos contables de la óptica, en los mismos meses.
+- Los meses posteriores al último estado de resultados se **estiman** con el promedio de los últimos 12 meses.
+- **Arriendo = $0** (el inmueble es propio). **Luz, agua y gas** no aparecen en el estado de resultados: se pagan en
+  conjunto para todo el inmueble (un solo medidor). Si se acuerda un monto para la óptica, se ingresa en la barra lateral.
+- Ojo: la cuenta contable 5301-01 "Ventas lentes ópticos (particulares)" cuadra con **todas** las boletas de la sala,
+  no solo con las OT particulares. En el dashboard se llama "Venta sala (cta. particulares)".
+
+Si no hay estados de resultados cargados, la barra lateral vuelve a pedir los gastos a mano.
 
 ## Archivos
 
@@ -27,7 +43,7 @@ que COALIVI entregue las cifras. Mientras estén en 0, el dashboard llega hasta 
 | `app.py` | La aplicación de Streamlit |
 | `procesamiento.py` | Limpieza de las planillas originales |
 | `generar_datos.py` | Crea la carpeta `data/` desde las planillas originales |
-| `data/` | Tablas limpias (`ventas`, `ot_sala`, `costos` en .csv.gz) |
+| `data/` | Tablas limpias (`ventas`, `ot_sala`, `costos`, `eerr` en .csv.gz) |
 | `logo.png`, `.streamlit/config.toml` | Logo y colores de COALIVI |
 
 ## Publicar (GitHub + Streamlit Community Cloud)
@@ -50,8 +66,9 @@ necesita cuenta de GitHub. Streamlit Community Cloud permite una sola app privad
   `python generar_datos.py "ruta/a/la/carpeta"`. Después subir a GitHub la carpeta `data` nueva.
 - **Solo para una sesión:** barra lateral → *Cargar / actualizar bases de datos* → subir las planillas.
 
-Planillas que reconoce: `CONSOLIDADO VENTAS ÓPTICA Y OT + BOLETAS`, `OT APPS FINAL - Sala de ventas particular`
-e `informe_costos_Sala_ventas`. Las planillas de convenio se saltan.
+Planillas que reconoce: `CONSOLIDADO VENTAS ÓPTICA Y OT + BOLETAS`, `OT APPS FINAL - Sala de ventas particular`,
+`informe_costos_Sala_ventas` y `Estado_de_Resultados_Comparativo_..._OPTICA` (se pueden subir varios años juntos;
+si un mes viene en dos archivos, queda el último). Las planillas de convenio se saltan.
 
 ## Correr en el computador
 

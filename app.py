@@ -360,14 +360,15 @@ with st.sidebar:
         st.markdown('<div class="logo-texto">COALIVI</div>', unsafe_allow_html=True)
 
     with st.expander('Cargar / actualizar bases de datos', expanded=not datos):
-        st.caption('Sube las planillas originales (.xlsx) tal como las entrega TI: boletas, OT de sala de ventas '
-                   'e informe de costos de sala. Reemplazan a las del repositorio mientras la página esté abierta.')
+        st.caption('Sube las planillas originales (.xlsx) tal como las entrega TI: boletas, OT de sala de ventas, '
+                   'informe de costos de sala y estados de resultados de la óptica. Reemplazan a las del '
+                   'repositorio mientras la página esté abierta.')
         subidos = st.file_uploader('Planillas Excel', type=['xlsx'],
                                    accept_multiple_files=True, label_visibility='collapsed')
         for archivo in subidos or []:
             try:
                 clave, tabla = procesar_subida(archivo.name, archivo.getvalue())
-                datos[clave] = tabla
+                datos[clave] = pr.unir_tablas(clave, datos.get(clave), tabla)   # los EERR de varios años se juntan
                 origen_datos[clave] = f'Subido: {archivo.name}'
                 st.success(f'{pr.BASES[clave]["nombre"]}: {miles(len(tabla))} filas')
             except Exception as error:
@@ -393,6 +394,13 @@ ventas_sala, ot_sala, costos = pr.solo_particular(datos['ventas'], datos['ot_sal
 ventas_todas = ventas_sala[ventas_sala['es_particular']]       # incluye las boletas anuladas (NC)
 ventas = ventas_todas[~ventas_todas['es_nc']]                   # venta válida
 
+# ---- Estado de resultados contable de la óptica (toda la óptica: particular + licitaciones + otros)
+eerr = datos['eerr']
+HAY_EERR = not eerr.empty and 'monto' in eerr.columns
+MESES_EERR = [pd.Timestamp(m) for m in sorted(eerr['mes'].dropna().unique())] if HAY_EERR else []
+COBERTURA_EERR = (f'{MESES[MESES_EERR[0].month - 1]} {MESES_EERR[0].year} a '
+                  f'{MESES[MESES_EERR[-1].month - 1]} {MESES_EERR[-1].year}') if HAY_EERR else ''
+
 # ---- Filtros de período, gastos y metas
 fecha_max = ventas['fecha'].max()
 anios = sorted(ventas['anio'].dropna().astype(int).unique().tolist(), reverse=True)
@@ -403,15 +411,34 @@ with st.sidebar:
     mes_ini, mes_fin = st.select_slider('Meses', options=MESES, value=(MESES[0], MESES[-1]))
     st.caption('Todo se compara con el **mismo tramo del año anterior**.')
 
-    with st.expander('Gastos operacionales (pendiente)'):
-        st.caption('Gasto **mensual** atribuible a la venta particular, sin IVA. Todavía no tenemos las cifras de '
-                   'COALIVI: mientras estén en 0, el dashboard llega hasta el margen directo.')
-        gasto_rem = st.number_input('Remuneraciones equipo óptica', min_value=0, value=0, step=100_000)
-        gasto_arr = st.number_input('Arriendo y gastos comunes', min_value=0, value=0, step=100_000)
-        gasto_ser = st.number_input('Servicios, sistemas y comunicaciones', min_value=0, value=0, step=50_000)
-        gasto_mkt = st.number_input('Marketing y difusión', min_value=0, value=0, step=50_000)
-        gasto_otr = st.number_input('Otros gastos de administración', min_value=0, value=0, step=50_000)
-        con_iva = st.checkbox('Los precios de venta incluyen IVA (19%)', value=True)
+    if HAY_EERR:
+        # Gastos reales del estado de resultados contable de la óptica
+        with st.expander('Gastos operacionales'):
+            st.caption(f'Vienen del **estado de resultados contable** de la óptica ({COBERTURA_EERR}). '
+                       'Se asignan a la venta particular según su % de los ingresos de la óptica. Los insumos '
+                       'no se suman aquí porque ya están en el costo directo. Arriendo: $0 (el inmueble es propio).')
+            con_finiquitos = st.checkbox('Incluir finiquitos (gasto no recurrente)', value=False)
+            gasto_basicos = st.number_input(
+                'Luz, agua y gas de la óptica ($ al mes, sin IVA)', min_value=0, value=0, step=50_000,
+                help='COALIVI paga estos servicios en conjunto: hay un solo medidor para todo el inmueble y no '
+                     'aparecen en el estado de resultados de la óptica. Si se acuerda cuánto le corresponde a la '
+                     'óptica (por ejemplo, según sus m²), se ingresa aquí.')
+            con_iva = st.checkbox('Los precios de venta incluyen IVA (19%)', value=True)
+        GASTOS_MANUALES = {}
+    else:
+        # Sin estado de resultados cargado: los gastos se ingresan a mano
+        with st.expander('Gastos operacionales (pendiente)'):
+            st.caption('Gasto **mensual** atribuible a la venta particular, sin IVA. Sube los estados de resultados '
+                       'de la óptica para usar los gastos reales; mientras estén en 0, el dashboard llega hasta '
+                       'el margen directo.')
+            GASTOS_MANUALES = {
+                'Remuneraciones equipo óptica': st.number_input('Remuneraciones equipo óptica', min_value=0, value=0, step=100_000),
+                'Servicios, sistemas y comunicaciones': st.number_input('Servicios, sistemas y comunicaciones', min_value=0, value=0, step=50_000),
+                'Marketing y difusión': st.number_input('Marketing y difusión', min_value=0, value=0, step=50_000),
+                'Otros gastos de administración': st.number_input('Otros gastos de administración', min_value=0, value=0, step=50_000),
+            }
+            con_iva = st.checkbox('Los precios de venta incluyen IVA (19%)', value=True)
+        con_finiquitos, gasto_basicos = False, 0
 
     with st.expander('Metas'):
         meta_crec = st.number_input('Crecimiento de ingresos vs año anterior (%)', value=5.0, step=1.0)
@@ -422,8 +449,6 @@ with st.sidebar:
         meta_atr = st.number_input('Entregas fuera de plazo máximo (%)', value=10.0, step=1.0)
         meta_err = st.number_input('Venta con OT mal registrada máximo (%)', value=2.0, step=0.5)
 
-GASTO_MENSUAL = gasto_rem + gasto_arr + gasto_ser + gasto_mkt + gasto_otr
-HAY_GASTOS = GASTO_MENSUAL > 0
 FACTOR_IVA = 1.19 if con_iva else 1.0
 
 i1, i2 = MESES.index(mes_ini) + 1, MESES.index(mes_fin) + 1
@@ -437,6 +462,86 @@ MESES_PERIODO = ((fin - ini).days + 1) / 30.44   # meses del período (para los 
 MESES_RANGO = range(i1, fin.month + 1)            # meses con datos (para los gráficos mensuales)
 
 ACT, ANT = str(int(anio)), str(int(anio) - 1)
+
+
+# ---- Gastos operacionales del período asignados a la venta particular
+def gastos_periodo(a, b):
+    # Devuelve un diccionario con:
+    #   total     -> gasto asignado a la venta particular entre a y b (NaN si no hay datos)
+    #   detalle   -> tabla por categoría: gasto de toda la óptica y parte asignada a la venta particular
+    #   pct_part  -> % de los ingresos de la óptica que es venta particular (criterio de reparto)
+    #   reales / estimados -> meses con estado de resultados real / meses estimados
+    if not HAY_EERR:
+        # Sin estado de resultados: montos mensuales de la barra lateral × meses del período
+        meses = ((b - a).days + 1) / 30.44
+        det = pd.DataFrame({'optica': pd.Series(GASTOS_MANUALES, dtype=float) * meses})
+        det['particular'] = det['optica']
+        total = det['particular'].sum()
+        return {'total': total if total > 0 else np.nan, 'detalle': det, 'pct_part': np.nan,
+                'reales': 0, 'estimados': 0}
+
+    # Gasto mensual por categoría (sin insumos: ya están en el costo directo de cada línea)
+    g = eerr[(eerr['tipo'] == 'Gasto') & (eerr['categoria'] != 'Insumos (costo de productos)')]
+    if not con_finiquitos:
+        g = g[g['categoria'] != 'Finiquitos']
+    gasto_mes = (g.pivot_table(index='mes', columns='categoria', values='monto', aggfunc='sum')
+                 .reindex(MESES_EERR).fillna(0))
+    if gasto_basicos > 0:
+        gasto_mes['Luz, agua y gas (ingreso manual)'] = gasto_basicos
+    # Ingresos de toda la óptica (contables) y venta particular del dashboard (boletas sin IVA)
+    ingreso_mes = eerr[eerr['tipo'] == 'Ingreso'].groupby('mes')['monto'].sum().reindex(MESES_EERR).fillna(0)
+    part_mes = (ventas.groupby('mes')['total'].sum() / FACTOR_IVA).reindex(MESES_EERR).fillna(0)
+
+    # Cada mes del período pesa según los días que entran (el último mes puede venir cortado)
+    real, est = pd.Series(0.0, index=MESES_EERR), 0.0
+    for p in pd.period_range(a, b, freq='M'):
+        dias = (min(b, p.end_time.normalize()) - max(a, p.start_time.normalize())).days + 1
+        fraccion = dias / p.days_in_month
+        if p.start_time in real.index:
+            real[p.start_time] += fraccion
+        elif p.start_time > MESES_EERR[-1]:
+            est += fraccion          # mes posterior al último estado de resultados: se estima
+        # los meses anteriores al primer estado de resultados quedan sin dato
+
+    if real.sum() == 0 and est == 0:
+        return {'total': np.nan, 'detalle': None, 'pct_part': np.nan, 'reales': 0, 'estimados': 0}
+
+    # Parte real: gasto de cada mes × % particular de esos mismos meses
+    gasto_real = gasto_mes.mul(real, axis=0).sum()
+    ing_real = (ingreso_mes * real).sum()
+    pct_real = (part_mes * real).sum() / ing_real if ing_real else 0
+    # Parte estimada: promedio mensual de los últimos 12 meses con estado de resultados
+    ultimos = MESES_EERR[-12:]
+    gasto_est = gasto_mes.loc[ultimos].mean() * est
+    pct_est = part_mes[ultimos].sum() / ingreso_mes[ultimos].sum() if ingreso_mes[ultimos].sum() else 0
+
+    det = pd.DataFrame({'optica': gasto_real + gasto_est, 'particular': gasto_real * pct_real + gasto_est * pct_est})
+    det = det[det['optica'] != 0]
+    orden = [c for c in pr.GASTOS_EERR + ['Luz, agua y gas (ingreso manual)'] if c in det.index]
+    det = det.loc[orden]
+    total_optica = det['optica'].sum()
+    return {'total': det['particular'].sum(), 'detalle': det,
+            'pct_part': 100 * det['particular'].sum() / total_optica if total_optica else np.nan,
+            'reales': real.sum(), 'estimados': est}
+
+
+GASTOS_ACT, GASTOS_ANT = gastos_periodo(ini, fin), gastos_periodo(ini_ant, fin_ant)
+HAY_GASTOS = not pd.isna(GASTOS_ACT['total']) and GASTOS_ACT['total'] > 0
+
+
+def texto_gastos(g):
+    # Explicación corta de dónde salen los gastos del período (para notas y leyendas)
+    if not HAY_EERR:
+        return 'Gastos operacionales = montos mensuales de la barra lateral.'
+    partes = []
+    if g['reales'] > 0:
+        partes.append(f'{miles(g["reales"], 1)} meses con estado de resultados real')
+    if g['estimados'] > 0:
+        partes.append(f'{miles(g["estimados"], 1)} meses <b>estimados</b> con el promedio de los últimos 12 meses '
+                      f'(el último estado de resultados es de {MESES[MESES_EERR[-1].month - 1]} {MESES_EERR[-1].year})')
+    return (f'Gastos operacionales = gastos de la óptica del estado de resultados contable (sin insumos'
+            f'{"" if con_finiquitos else " ni finiquitos"}), asignados a la venta particular según su peso en los '
+            f'ingresos de la óptica ({pct(g["pct_part"])}). Período: ' + ' y '.join(partes) + '.')
 COMPARADO = f'vs mismo tramo {ANT}'
 
 
@@ -496,7 +601,7 @@ def porcentaje_costo():
 PCT_COSTO = porcentaje_costo()
 
 
-def estado_resultados(v, meses):
+def estado_resultados(v, gasto_total):
     # Ingresos netos, costo directo, margen directo, gastos operacionales y margen operacional por línea
     bruto = v.groupby('linea')['total'].sum().reindex(pr.LINEAS, fill_value=0)
     er = pd.DataFrame(index=pr.LINEAS)
@@ -505,19 +610,20 @@ def estado_resultados(v, meses):
     er['margen_directo'] = er['ingresos'] - er['costo']
     total_ing = er['ingresos'].sum()
     participacion = er['ingresos'] / total_ing if total_ing else 0
-    er['gastos'] = GASTO_MENSUAL * meses * participacion   # gastos repartidos según los ingresos
+    hay_gasto = not pd.isna(gasto_total) and gasto_total > 0
+    er['gastos'] = (gasto_total if hay_gasto else 0) * participacion   # gastos repartidos según los ingresos
     er['margen_operacional'] = er['margen_directo'] - er['gastos']
     er.loc['Total'] = er.sum()
     er['pct_ingresos'] = 100 * er['ingresos'] / total_ing if total_ing else np.nan
     er['pct_md'] = 100 * er['margen_directo'] / er['ingresos'].replace(0, np.nan)
     er['pct_mo'] = 100 * er['margen_operacional'] / er['ingresos'].replace(0, np.nan)
-    if not HAY_GASTOS:                                     # sin gastos no hay margen operacional
+    if not hay_gasto:                                      # sin gastos no hay margen operacional
         er[['gastos', 'margen_operacional', 'pct_mo']] = np.nan
     return er
 
 
-ER_ACT = estado_resultados(v_act, MESES_PERIODO)
-ER_ANT = estado_resultados(v_ant, MESES_PERIODO)
+ER_ACT = estado_resultados(v_act, GASTOS_ACT['total'])
+ER_ANT = estado_resultados(v_ant, GASTOS_ANT['total'])
 TOT, TOT_ANT = ER_ACT.loc['Total'], ER_ANT.loc['Total']
 
 
@@ -602,6 +708,69 @@ def valor_meta(nombre, valor, unidad):
 
 
 # =============================================================================
+# 6b. Estado de resultados contable de toda la óptica (tabla comparativa)
+# =============================================================================
+def nombre_tramo(meses):
+    # [ene-2025 ... jun-2025] -> 'Ene–Jun 2025'; año completo -> '2025'
+    if len(meses) == 12:
+        return str(meses[0].year)
+    if len(meses) == 1:
+        return f'{MESES[meses[0].month - 1]} {meses[0].year}'
+    return f'{MESES[meses[0].month - 1]}–{MESES[meses[-1].month - 1]} {meses[0].year}'
+
+
+def columnas_eerr():
+    # Columnas de la tabla comparativa: años completos y, si el último año está incompleto,
+    # el mismo tramo del año anterior y del último año. Devuelve ([(nombre, meses)], (col_anterior, col_actual))
+    ultimo = MESES_EERR[-1]
+    cubiertos = set(MESES_EERR)
+    cols = []
+    for a in sorted({m.year for m in MESES_EERR}):
+        meses_a = [m for m in MESES_EERR if m.year == a]
+        if len(meses_a) == 12:
+            cols.append((str(a), meses_a))
+    if ultimo.month < 12:
+        act = [m for m in MESES_EERR if m.year == ultimo.year]
+        ant = [m - pd.DateOffset(years=1) for m in act]
+        if all(m in cubiertos for m in ant):
+            cols += [(nombre_tramo(ant), ant), (nombre_tramo(act), act)]
+        else:
+            cols.append((nombre_tramo(act), act))
+    comparar = (cols[-2][0], cols[-1][0]) if len(cols) >= 2 else (None, None)
+    return cols, comparar
+
+
+def eerr_suma(meses):
+    # Suma de cada categoría (ingresos y gastos) en los meses indicados
+    e = eerr[eerr['mes'].isin(meses)]
+    return e.groupby(['tipo', 'categoria'])['monto'].sum()
+
+
+def tabla_eerr_numeros():
+    # Estado de resultados por categoría: una columna por año / tramo. Devuelve (tabla, filas de total)
+    cols, _ = columnas_eerr()
+    sumas = {n: eerr_suma(m) for n, m in cols}
+    filas, totales = {}, []
+    for tipo, categorias, total in [('Ingreso', pr.INGRESOS_EERR, 'Total ingresos'),
+                                    ('Gasto', pr.GASTOS_EERR, 'Total gastos')]:
+        for c in categorias:
+            valores = {n: sumas[n].get((tipo, c), 0.0) for n, _ in cols}
+            if any(v != 0 for v in valores.values()):            # categorías sin movimiento no se muestran
+                filas[c] = valores
+        filas[total] = {n: sum(sumas[n].get((tipo, c), 0.0) for c in categorias) for n, _ in cols}
+        totales.append(total)
+    filas['Resultado'] = {n: filas['Total ingresos'][n] - filas['Total gastos'][n] for n, _ in cols}
+    totales.append('Resultado')
+    return pd.DataFrame(filas).T, totales
+
+
+def tabla_eerr_excel():
+    t, _ = tabla_eerr_numeros()
+    t.loc['% resultado sobre ingresos'] = 100 * t.loc['Resultado'] / t.loc['Total ingresos'].replace(0, np.nan)
+    return t.round(1).rename_axis('Cuenta').reset_index()
+
+
+# =============================================================================
 # 7. Reporte ejecutivo descargable (Excel)
 # =============================================================================
 def reporte_excel():
@@ -640,16 +809,30 @@ def reporte_excel():
         sup = pd.DataFrame({'Línea': PCT_COSTO.index, '% costo sobre precio': 100 * PCT_COSTO['pct_costo'].values,
                             'Fuente': PCT_COSTO['fuente'].values})
         sup.round(1).to_excel(w, sheet_name='Supuestos', startrow=4, index=False)
-        gastos = pd.DataFrame({'Gasto operacional mensual': ['Remuneraciones', 'Arriendo y gastos comunes',
-                                                             'Servicios y sistemas', 'Marketing', 'Otros', 'TOTAL'],
-                               'Monto ($)': [gasto_rem, gasto_arr, gasto_ser, gasto_mkt, gasto_otr, GASTO_MENSUAL]})
+        det = GASTOS_ACT['detalle']
+        if det is not None and not det.empty:
+            gastos = det.round(0).reset_index()
+            gastos.columns = ['Gasto operacional del período', 'Toda la óptica ($)', 'Asignado a venta particular ($)']
+            gastos.loc[len(gastos)] = ['TOTAL', round(det['optica'].sum()), round(det['particular'].sum())]
+        else:
+            gastos = pd.DataFrame({'Gasto operacional del período': ['Sin datos de gastos'],
+                                   'Toda la óptica ($)': [np.nan], 'Asignado a venta particular ($)': [np.nan]})
         gastos.to_excel(w, sheet_name='Supuestos', startrow=len(sup) + 7, index=False)
+        ws_sup = w.sheets['Supuestos']
+        ws_sup.cell(row=len(sup) + 8 + len(gastos) + 1, column=1,
+                    value=texto_gastos(GASTOS_ACT).replace('<b>', '').replace('</b>', ''))
+
+        # Hoja 5: estado de resultados contable de la óptica (si está cargado)
+        if HAY_EERR:
+            tabla_eerr_excel().to_excel(w, sheet_name='EERR contable', startrow=4, index=False)
 
         # Formato: título, encabezados azules, números y anchos de columna
         titulos = {'Resumen': 'Reporte ejecutivo · Venta particular · Óptica COALIVI',
                    'Resultados por línea': 'Estado de resultados por línea de producto (montos netos de IVA)',
                    'Venta mensual': 'Venta particular mensual (con IVA)',
                    'Supuestos': 'Supuestos del cálculo de márgenes'}
+        if HAY_EERR:
+            titulos['EERR contable'] = 'Estado de resultados contable de toda la óptica (montos netos)'
         for hoja, titulo in titulos.items():
             ws = w.book[hoja]
             ws['A1'] = titulo
@@ -670,6 +853,9 @@ def reporte_excel():
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = 20
             ws.column_dimensions['A'].width = 40
+        if HAY_EERR:
+            w.book['EERR contable']['A2'] = (f'Estados de resultados de {COBERTURA_EERR} · todas las cuentas '
+                                             '(incluye licitaciones, finiquitos e insumos)')
     return salida.getvalue()
 
 
@@ -688,8 +874,8 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-tabs = st.tabs(['Resumen ejecutivo', 'Resultados por línea', 'Comercial', 'Descuentos', 'Operaciones',
-                'Calidad de datos'])
+tabs = st.tabs(['Resumen ejecutivo', 'Resultados por línea', 'EERR contable', 'Comercial', 'Descuentos',
+                'Operaciones', 'Calidad de datos'])
 
 
 # =============================================================================
@@ -698,7 +884,9 @@ tabs = st.tabs(['Resumen ejecutivo', 'Resultados por línea', 'Comercial', 'Desc
 with tabs[0]:
     col_a, col_b = st.columns([4, 1])
     col_a.caption('Ingresos netos de IVA de la venta particular. Costo directo estimado con el informe de costos. '
-                  + ('Gastos operacionales según la barra lateral.' if HAY_GASTOS
+                  + ((('Gastos operacionales del estado de resultados contable, asignados a la venta particular '
+                       '(detalle en la pestaña Resultados por línea).') if HAY_EERR
+                      else 'Gastos operacionales según la barra lateral.') if HAY_GASTOS
                      else 'Gastos operacionales: pendientes (el margen operacional se calcula cuando se ingresen).'))
     col_b.download_button('Descargar reporte (Excel)', reporte_excel(),
                           file_name=f'Reporte_COALIVI_particular_{ini:%Y%m%d}_{fin:%Y%m%d}.xlsx',
@@ -815,7 +1003,7 @@ with tabs[1]:
     nota('<b>Cómo se calcula.</b> Ingresos = boletas de OT particulares, sin IVA. Costo directo = % de costo de '
          f'cada línea según el informe de costos ({rango_k}), aplicado a todo el período: es un <b>estimado</b>. '
          'El costo de los cristales viene de las listas de precios de los proveedores (preliminar, por validar). '
-         + ('Gastos operacionales = montos de la barra lateral, repartidos según los ingresos de cada línea.'
+         + (texto_gastos(GASTOS_ACT) + ' Dentro de la venta particular, se reparten entre líneas según sus ingresos.'
             if HAY_GASTOS else 'Gastos operacionales: <b>pendientes</b>.'))
 
     fila_kpi([
@@ -824,8 +1012,9 @@ with tabs[1]:
         tarjeta('Margen directo', mm(TOT['margen_directo']),
                 variacion(TOT['margen_directo'], TOT_ANT['margen_directo']), COMPARADO,
                 meta=semaforo('Margen directo')),
-        tarjeta('Gastos operacionales', mm(TOT['gastos']) if HAY_GASTOS else 'Pendiente', None,
-                f'{clp(GASTO_MENSUAL)} al mes' if HAY_GASTOS else 'se ingresan en la barra lateral'),
+        tarjeta('Gastos operacionales', mm(TOT['gastos']) if HAY_GASTOS else 'Pendiente',
+                variacion(TOT['gastos'], TOT_ANT['gastos']) if HAY_GASTOS else None,
+                COMPARADO if HAY_GASTOS else 'se ingresan en la barra lateral', invertir=True),
         tarjeta('Margen operacional', mm(TOT['margen_operacional']) if HAY_GASTOS else 'Pendiente',
                 variacion(TOT['margen_operacional'], TOT_ANT['margen_operacional']) if HAY_GASTOS else None,
                 COMPARADO if HAY_GASTOS else 'faltan los gastos de COALIVI',
@@ -884,9 +1073,19 @@ with tabs[1]:
             '% costo sobre precio de venta (con IVA)': (100 * PCT_COSTO['pct_costo']).apply(pct),
             'Fuente': PCT_COSTO['fuente'],
         }))
-        st.caption((f'Gastos operacionales: {clp(GASTO_MENSUAL)} al mes × {miles(MESES_PERIODO, 1)} meses del '
-                    f'período = {clp(GASTO_MENSUAL * MESES_PERIODO)}. ' if HAY_GASTOS else
-                    'Gastos operacionales: pendientes. ') + f'Precios con IVA: {"sí" if con_iva else "no"}.')
+        det = GASTOS_ACT['detalle']
+        if HAY_GASTOS and det is not None and not det.empty:
+            st.markdown('**Gastos operacionales del período**')
+            tabla_html(pd.DataFrame({
+                'Gasto': list(det.index) + ['Total'],
+                'Toda la óptica': [clp(x) for x in det['optica']] + [clp(det['optica'].sum())],
+                'Asignado a venta particular': [clp(x) for x in det['particular']] + [clp(det['particular'].sum())],
+            }), con_total=True)
+            st.markdown(f'<div class="subtitulo" style="margin-left:0">{texto_gastos(GASTOS_ACT)}</div>',
+                        unsafe_allow_html=True)
+        else:
+            st.caption('Gastos operacionales: pendientes.')
+        st.caption(f'Precios con IVA: {"sí" if con_iva else "no"}.')
 
     # ---- Rentabilidad real, OT por OT, del informe de costos
     with st.expander('Rentabilidad real del informe de costos (OT particulares)', expanded=True):
@@ -966,9 +1165,199 @@ with tabs[1]:
 
 
 # =============================================================================
+# 10b. Pestaña: Estado de resultados contable (toda la óptica)
+# =============================================================================
+COLOR_INGRESO = dict(zip(pr.INGRESOS_EERR, [SERIES[0], SERIES[3], SERIES[1], '#C3C8D4']))
+
+
+def resumen_eerr(meses):
+    # Ingresos, gastos y resultado de toda la óptica en los meses indicados
+    e = eerr[eerr['mes'].isin(meses)]
+    ing = e.loc[e['tipo'] == 'Ingreso', 'monto'].sum()
+    gas = e.loc[e['tipo'] == 'Gasto', 'monto'].sum()
+    return {'ingresos': ing, 'gastos': gas, 'resultado': ing - gas,
+            'pct_resultado': 100 * (ing - gas) / ing if ing else np.nan}
+
+
+with tabs[2]:
+    if not HAY_EERR:
+        sin_datos('Todavía no se carga el estado de resultados contable de la óptica. Súbelo en la barra lateral '
+                  '(Cargar / actualizar bases de datos).')
+    else:
+        nota('<b>Qué muestra.</b> El estado de resultados contable de <b>toda la óptica</b>, tal como lo entrega '
+             f'contabilidad ({COBERTURA_EERR}), con montos netos. A diferencia del resto del dashboard, aquí sí '
+             'aparecen las licitaciones: los gastos de la óptica (sueldos, mantención, etc.) son compartidos entre '
+             'todos los tipos de venta. Se suman todas las cuentas, aunque la planilla original omita alguna en '
+             'su total. <b>No incluye</b> luz, agua, gas ni arriendo: el inmueble es propio y los servicios básicos '
+             'se pagan en conjunto para todo el inmueble (un solo medidor).')
+
+        # ---- KPIs del período elegido en la barra lateral (solo meses con estado de resultados)
+        cubiertos = set(MESES_EERR)
+        meses_sel = [m for m in MESES_EERR if ini <= m <= fin]
+        meses_sel_ant = [m - pd.DateOffset(years=1) for m in meses_sel]
+        hay_ant = bool(meses_sel) and all(m in cubiertos for m in meses_sel_ant)
+        if meses_sel:
+            r_act = resumen_eerr(meses_sel)
+            r_ant = resumen_eerr(meses_sel_ant) if hay_ant else None
+            tramo_sel = nombre_tramo(meses_sel)
+            comparado_eerr = f'vs {nombre_tramo(meses_sel_ant)}' if hay_ant else 'sin año anterior para comparar'
+            seccion('Resultado contable de la óptica', f'{tramo_sel} · meses del período elegido con estado de resultados')
+            fila_kpi([
+                tarjeta('Ingresos de la óptica', mm(r_act['ingresos']),
+                        variacion(r_act['ingresos'], r_ant['ingresos']) if hay_ant else None, comparado_eerr),
+                tarjeta('Gastos de la óptica', mm(r_act['gastos']),
+                        variacion(r_act['gastos'], r_ant['gastos']) if hay_ant else None, comparado_eerr, invertir=True),
+                tarjeta('Resultado contable', mm(r_act['resultado']),
+                        variacion(r_act['resultado'], r_ant['resultado']) if hay_ant else None, comparado_eerr),
+                tarjeta('Resultado / ingresos', pct(r_act['pct_resultado']),
+                        diferencia(r_act['pct_resultado'], r_ant['pct_resultado']) if hay_ant else None,
+                        comparado_eerr, puntos=True),
+            ])
+            if meses_sel[-1] < fin.to_period('M').start_time:
+                st.caption(f'El período elegido llega a {MESES[fin.month - 1]} {fin.year}, pero el último estado de '
+                           f'resultados es de {MESES[MESES_EERR[-1].month - 1]} {MESES_EERR[-1].year}.')
+        else:
+            st.info(f'El período elegido no tiene estado de resultados (hay datos de {COBERTURA_EERR}). '
+                    'Abajo se muestran todos los años disponibles.')
+
+        # ---- Tabla comparativa por año
+        cols_eerr, (c_ant, c_act) = columnas_eerr()
+        T, totales_eerr = tabla_eerr_numeros()
+        seccion('Estado de resultados comparativo',
+                'años completos y mismo tramo del último año · montos netos · todas las cuentas')
+        filas = []
+        for cuenta, fila in T.iterrows():
+            negrita = cuenta in totales_eerr
+            celda = (lambda x: f'<b>{x}</b>') if negrita else (lambda x: x)
+            datos_fila = {'Cuenta': celda(cuenta)}
+            for c, _ in cols_eerr:
+                datos_fila[c] = celda(clp(fila[c]))
+            if c_ant:
+                datos_fila['Var. %'] = celda(pct(variacion(fila[c_act], fila[c_ant])))
+            filas.append(datos_fila)
+        # Última fila: % de resultado sobre los ingresos
+        pct_fila = {'Cuenta': '<b>% resultado sobre ingresos</b>'}
+        for c, _ in cols_eerr:
+            pct_fila[c] = f'<b>{pct(100 * T.loc["Resultado", c] / T.loc["Total ingresos", c])}</b>'
+        if c_ant:
+            d_pp = diferencia(100 * T.loc['Resultado', c_act] / T.loc['Total ingresos', c_act],
+                              100 * T.loc['Resultado', c_ant] / T.loc['Total ingresos', c_ant])
+            pct_fila['Var. %'] = f'<b>{miles(d_pp, 1)} pp</b>'
+        filas.append(pct_fila)
+        tabla_html(pd.DataFrame(filas), con_total=True, negativas=['Var. %'] + [c for c, _ in cols_eerr])
+
+        # ---- Gráficos: ingresos por tipo de venta y gastos por categoría
+        col1, col2 = st.columns(2, gap='medium')
+        with col1:
+            seccion('Ingresos mensuales por tipo de venta', 'toda la óptica · montos netos')
+            im = eerr[eerr['tipo'] == 'Ingreso'].groupby(['mes', 'categoria'], as_index=False)['monto'].sum()
+            im['Mes'] = etiqueta_mes(im['mes'])
+            fig = px.bar(im, x='Mes', y='monto', color='categoria', color_discrete_map=COLOR_INGRESO,
+                         category_orders={'categoria': pr.INGRESOS_EERR,
+                                          'Mes': etiqueta_mes(pd.Series(MESES_EERR)).tolist()})
+            fig.update_traces(marker_line_color='white', marker_line_width=1,
+                              hovertemplate='%{x}<br>$%{y:,.0f}<extra>%{fullData.name}</extra>')
+            fig.update_layout(barmode='relative', xaxis_title=None, yaxis_title=None)
+            mostrar(fig, 380)
+        with col2:
+            if c_ant:
+                seccion('Gastos de la óptica por categoría', f'{c_ant} vs {c_act}')
+                gastos_cat = [c for c in pr.GASTOS_EERR if c in T.index]
+                gc = T.loc[gastos_cat, [c_ant, c_act]].rename_axis('Categoría').reset_index()
+                gc = gc.melt(id_vars='Categoría', var_name='Período', value_name='Monto')
+                fig = px.bar(gc, y='Categoría', x='Monto', color='Período', orientation='h', barmode='group',
+                             color_discrete_map={c_ant: AZUL_SUAVE, c_act: AZUL},
+                             category_orders={'Categoría': gastos_cat, 'Período': [c_act, c_ant]})
+                fig.update_traces(marker_line_width=0, hovertemplate='%{y}<br>$%{x:,.0f}<extra>%{fullData.name}</extra>')
+                fig.update_layout(xaxis_title=None, yaxis_title=None)
+                mostrar(fig, 380)
+
+        # ---- Hallazgos que se escriben solos con los datos contables
+        puntos = []
+        if c_ant:
+            r1, r0 = T.loc['Resultado', c_act], T.loc['Resultado', c_ant]
+            puntos.append(f'En {c_act} la óptica tuvo un resultado contable de <b>{mm(r1)}</b> '
+                          f'({pct(100 * r1 / T.loc["Total ingresos", c_act])} de los ingresos), contra {mm(r0)} en '
+                          f'{c_ant} ({pct(variacion(r1, r0))} de variación).')
+        if 'Licitaciones (SSC y COSADES)' in T.index:
+            pesos = ', '.join(f'{pct(100 * T.loc["Licitaciones (SSC y COSADES)", c] / T.loc["Total ingresos", c], 0)} '
+                              f'en {c}' for c, _ in cols_eerr)
+            puntos.append(f'Las licitaciones pesan {pesos} de los ingresos de la óptica: comparten con la venta '
+                          'particular los sueldos y la mantención.')
+        # Nombre de cada año ('2025' si está completo, 'Ene–Jun 2026' si no)
+        anios_eerr = sorted({m.year for m in MESES_EERR})
+        nombre_anio = {a: nombre_tramo([m for m in MESES_EERR if m.year == a]) for a in anios_eerr}
+        # Insumos contabilizados con ajustes de fin de año (solo años completos)
+        ins = eerr[eerr['categoria'] == 'Insumos (costo de productos)']
+        en_diciembre = []
+        for a in anios_eerr:
+            del_anio = ins[ins['anio'] == a]
+            if nombre_anio[a] == str(a) and del_anio['monto'].sum() > 0:
+                pct_dic = 100 * del_anio.loc[del_anio['mes'].dt.month == 12, 'monto'].sum() / del_anio['monto'].sum()
+                if pct_dic >= 30:
+                    en_diciembre.append(f'{pct(pct_dic, 0)} en {a}')
+        if en_diciembre:
+            puntos.append('Buena parte de los insumos (armazones, cristales) se contabiliza en diciembre '
+                          f'(<b>{", ".join(en_diciembre)}</b>): el resultado <b>mensual</b> no sirve para comparar '
+                          'meses; conviene mirar tramos o años completos.')
+        mkt = eerr[eerr['categoria'] == 'Publicidad y marketing'].groupby('anio')['monto'].sum()
+        puntos.append('Gasto en publicidad y marketing: ' +
+                      ', '.join(f'{clp(mkt.get(a, 0))} en {nombre_anio[a]}' for a in anios_eerr) +
+                      '. La óptica prácticamente no invierte en difusión.')
+        fin_anio = eerr[eerr['categoria'] == 'Finiquitos'].groupby('anio')['monto'].sum()
+        if fin_anio.sum() > 0:
+            puntos.append('Finiquitos (gasto no recurrente): ' +
+                          ', '.join(f'{mm(fin_anio.get(a, 0))} en {nombre_anio[a]}' for a in anios_eerr) +
+                          '. Por defecto no se cuentan en el margen operacional (se pueden incluir en la barra lateral).')
+        lista = ''.join(f'<li>{p}</li>' for p in puntos)
+        st.markdown(f'<div class="hallazgos" style="margin-top:12px"><h4>Hallazgos del estado de resultados</h4>'
+                    f'<ul>{lista}</ul></div>', unsafe_allow_html=True)
+
+        # ---- Cuadratura con las boletas del dashboard
+        with st.expander('Cuadratura: contabilidad vs boletas del dashboard'):
+            st.caption('La cuenta contable 5301-01 se llama "particulares", pero cuadra con **todas** las boletas de '
+                       'la sala (también las OT de convenios y operativos). La venta particular del dashboard (solo OT '
+                       'con convenio PARTICULAR) es una parte de esa cuenta. Montos sin IVA.')
+            cont = eerr[eerr['subcuenta'] == '5301-01'].groupby('mes')['monto'].sum().reindex(MESES_EERR).fillna(0)
+            sala = (ventas_sala[~ventas_sala['es_nc']].groupby('mes')['total'].sum() / FACTOR_IVA).reindex(MESES_EERR)
+            part = (ventas.groupby('mes')['total'].sum() / FACTOR_IVA).reindex(MESES_EERR)
+            cq = pd.DataFrame({'mes': MESES_EERR, 'Contabilidad (cta. particulares)': cont.values,
+                               'Boletas de toda la sala': sala.values, 'Boletas OT particulares': part.values})
+            cq['Mes'] = etiqueta_mes(cq['mes'])
+            larga = cq.melt(id_vars=['mes', 'Mes'], var_name='Fuente', value_name='Monto')
+            fig = px.line(larga, x='Mes', y='Monto', color='Fuente', markers=True,
+                          color_discrete_map={'Contabilidad (cta. particulares)': NARANJO,
+                                              'Boletas de toda la sala': AZUL,
+                                              'Boletas OT particulares': SERIES[2]})
+            fig.update_traces(hovertemplate='%{x}<br>$%{y:,.0f}<extra>%{fullData.name}</extra>')
+            fig.update_layout(xaxis_title=None, yaxis_title=None, xaxis_type='category')
+            mostrar(fig, 340)
+            cq['Dif. sala vs contabilidad'] = 100 * (cq['Boletas de toda la sala'] / cq['Contabilidad (cta. particulares)'].replace(0, np.nan) - 1)
+            raros = cq[cq['Dif. sala vs contabilidad'].abs() > 25]
+            if not raros.empty:
+                st.caption('Meses donde las boletas de la sala y la cuenta contable difieren más de 25% (posible venta '
+                           'registrada en otra cuenta): ' + ', '.join(raros['Mes']) + '.')
+
+        # ---- Detalle por cuenta contable y descarga
+        with st.expander('Detalle por cuenta contable'):
+            det_cuenta = eerr.copy()
+            det_cuenta['Cuenta'] = det_cuenta['subcuenta'] + ' ' + det_cuenta['nombre']
+            columnas_det = {}
+            for c, meses_c in cols_eerr:
+                columnas_det[c] = det_cuenta[det_cuenta['mes'].isin(meses_c)].groupby(['tipo', 'categoria', 'Cuenta'])['monto'].sum()
+            dc = pd.DataFrame(columnas_det).fillna(0).reset_index().sort_values(['tipo', 'categoria', 'Cuenta'],
+                                                                                    ascending=[False, True, True])
+            st.dataframe(dc.rename(columns={'tipo': 'Tipo', 'categoria': 'Categoría'}), hide_index=True,
+                         column_config={c: st.column_config.NumberColumn(format='localized') for c, _ in cols_eerr})
+            st.download_button('Descargar estado de resultados (mes a mes, CSV)',
+                               eerr.drop(columns=['anio']).to_csv(index=False).encode('utf-8-sig'),
+                               file_name='coalivi_estado_resultados_optica.csv', mime='text/csv', key='descarga_eerr')
+
+
+# =============================================================================
 # 11. Pestaña: Comercial (ventas, derivación y descuentos)
 # =============================================================================
-with tabs[2]:
+with tabs[3]:
     fila_kpi([
         tarjeta('Boletas emitidas', miles(boletas_act), variacion(boletas_act, boletas_ant), COMPARADO),
         tarjeta('Ticket promedio por boleta', clp(ticket_act), variacion(ticket_act, ticket_ant), COMPARADO),
@@ -1111,7 +1500,7 @@ def descuento_maximo(precio, costo, meta):
     return 100 * (1 - costo / (precio * (1 - meta / 100)))
 
 
-with tabs[3]:
+with tabs[4]:
     nota('<b>Cómo se calcula.</b> El campo de descuento de la OT (<i>descT</i>) <b>no es el porcentaje, es un código</b>. '
          'El % real se obtiene comparando lo cobrado en la OT con el precio de lista de sus productos (informe de '
          'costos): por ejemplo, el código 8 ≈ 10%, el 11 ≈ 20% y el 12 ≈ 30%. El margen se calcula con montos netos '
@@ -1245,7 +1634,7 @@ with tabs[3]:
 # =============================================================================
 # 12. Pestaña: Operaciones
 # =============================================================================
-with tabs[4]:
+with tabs[5]:
     sin_fecha =100 * s_act['fecha_entrega'].isna().mean() if not s_act.empty else np.nan
     fila_kpi([
         tarjeta('Plazo de entrega (mediana)', f'{miles(lt_act)} días', variacion(lt_act, lt_ant), COMPARADO,
@@ -1313,7 +1702,7 @@ with tabs[4]:
 # =============================================================================
 # 13. Pestaña: Calidad de datos
 # =============================================================================
-with tabs[5]:
+with tabs[6]:
     sin_or =100 - der_act if not pd.isna(der_act) else np.nan
     sin_costo = ((costos['venta'] > 0) & (costos['costo'] == 0)).sum() if not costos.empty else 0
     corregidos = (costos['arreglo'] != '').sum() if 'arreglo' in costos.columns else 0
@@ -1403,17 +1792,17 @@ with tabs[5]:
         st.markdown("""
 **Actualizar solo para esta sesión:** barra lateral → *Cargar / actualizar bases de datos* → subir las
 planillas originales (`CONSOLIDADO VENTAS ÓPTICA Y OT + BOLETAS`, `OT APPS FINAL - Sala de ventas particular`,
-`informe_costos_Sala_ventas`).
+`informe_costos_Sala_ventas` y los `Estado_de_Resultados_Comparativo` de la óptica, uno por año).
 
 **Actualizar para todos:** correr `python generar_datos.py "carpeta con las planillas"` y subir a GitHub la
 carpeta `data` nueva (ver README).
 """)
-        descargas = {'ventas': ventas_todas, 'ot_sala': ot_sala, 'costos': costos}
-        columnas = st.columns(3)
+        descargas = {'ventas': ventas_todas, 'ot_sala': ot_sala, 'costos': costos, 'eerr': eerr}
+        columnas = st.columns(4)
         for n_, (clave, info) in enumerate(pr.BASES.items()):
             df = descargas[clave]
             if not df.empty:
-                columnas[n_ % 3].download_button(f'{info["nombre"]} (particular)',
+                columnas[n_ % 4].download_button(f'{info["nombre"]}' + ('' if clave == 'eerr' else ' (particular)'),
                                                  df.to_csv(index=False).encode('utf-8-sig'),
                                                  file_name=f'coalivi_particular_{clave}.csv', mime='text/csv',
                                                  key=f'descarga_{clave}')

@@ -24,6 +24,9 @@ BASES = {
                 'nombre': 'OT de la sala de ventas'},
     'costos':  {'claves': ['INFORME_COSTOS_SALA', 'INFORME COSTOS SALA', 'INFORME_COSTOS_ANALITICO'], 'hoja': 0, 'header': 0,
                 'nombre': 'Informe de costos de la sala'},
+    # Estado de resultados contable de la óptica (viene en un archivo por año; se juntan todos)
+    'eerr':    {'claves': ['ESTADO_DE_RESULTADO', 'ESTADO DE RESULTADO'], 'hoja': 0, 'header': None,
+                'nombre': 'Estado de resultados contable'},
 }
 
 # Planillas que se reconocen pero quedan fuera: licitaciones y convenio institucional (fuera del foco particular)
@@ -34,6 +37,7 @@ FECHAS = {
     'ventas': ['fecha'],
     'ot_sala': ['fecha', 'fecha_prometida', 'fecha_entrega'],
     'costos': ['fecha'],
+    'eerr': ['fecha'],
 }
 
 # Líneas de producto para el estado de resultados
@@ -244,7 +248,97 @@ def limpiar_costos(df):
     return agregar_periodo(k)
 
 
-LIMPIEZA = {'ventas': limpiar_ventas, 'ot_sala': limpiar_ot_sala, 'costos': limpiar_costos}
+# ---------------------------------------------------------------------------
+# 3b. Estado de resultados contable de la óptica ('Estado de Resultados Comparativo')
+# ---------------------------------------------------------------------------
+# Cada subcuenta contable se agrupa en una categoría para el dashboard
+# La cuenta 5301-01 se llama 'particulares', pero cuadra con TODAS las boletas de la sala (también las OT
+# de convenios y operativos): por eso se llama 'Venta sala' y no 'Venta particular'.
+INGRESOS_EERR = ['Venta sala (cta. particulares)', 'Ventas públicos', 'Licitaciones (SSC y COSADES)', 'Otros ingresos']
+GASTOS_EERR = ['Insumos (costo de productos)', 'Remuneraciones y honorarios', 'Finiquitos',
+               'Mantención y depreciación', 'Comisiones Transbank / IMED', 'Publicidad y marketing',
+               'Otros gastos de operación']
+
+SUBCUENTA_A_INGRESO = {'5301-01': 'Venta sala (cta. particulares)', '5301-02': 'Ventas públicos',
+                       '5301-07': 'Licitaciones (SSC y COSADES)', '5301-08': 'Licitaciones (SSC y COSADES)'}
+CUENTA_A_GASTO = {
+    '4416': 'Insumos (costo de productos)', '4417': 'Insumos (costo de productos)',
+    '4418': 'Insumos (costo de productos)', '4419': 'Insumos (costo de productos)',
+    '4424': 'Insumos (costo de productos)',
+    '4401': 'Remuneraciones y honorarios', '4403': 'Remuneraciones y honorarios',
+    '4404': 'Remuneraciones y honorarios', '4421': 'Remuneraciones y honorarios',
+    '4436': 'Remuneraciones y honorarios', '4437': 'Remuneraciones y honorarios',
+    '4438': 'Remuneraciones y honorarios',
+    '4428': 'Finiquitos',
+    '4201': 'Mantención y depreciación', '4405': 'Mantención y depreciación', '4406': 'Mantención y depreciación',
+    '4422': 'Comisiones Transbank / IMED',
+    '4423': 'Publicidad y marketing',
+}
+
+
+def categoria_eerr(cuenta, subcuenta):
+    # Cuentas 5xxx = ingresos, 4xxx = gastos. Lo que no está en las listas va a "Otros"
+    if cuenta.startswith('5'):
+        return SUBCUENTA_A_INGRESO.get(subcuenta, 'Otros ingresos')
+    return CUENTA_A_GASTO.get(cuenta, 'Otros gastos de operación')
+
+
+def limpiar_eerr(df):
+    # La planilla viene sin encabezado en la primera fila: se busca la fila que dice "Cuenta"
+    fila_cab = None
+    for i in range(min(len(df), 40)):
+        if df.iloc[i].fillna('').astype(str).str.strip().str.upper().eq('CUENTA').any():
+            fila_cab = i
+            break
+    if fila_cab is None:
+        raise ValueError('no se encontró la fila de encabezado ("Cuenta") del estado de resultados.')
+    cab = df.iloc[fila_cab].fillna('').astype(str).str.strip()
+    col_cuenta = cab[cab.str.upper() == 'CUENTA'].index[0]
+    # Columnas de mes: '01-2026', '02-2026'... (las columnas de totales del período se ignoran)
+    col_meses = {c: pd.Timestamp(int(t[3:]), int(t[:2]), 1) for c, t in cab.items() if re.fullmatch(r'\d{2}-\d{4}', t)}
+    if not col_meses:
+        raise ValueError('no se encontraron columnas de mes (MM-AAAA) en el estado de resultados.')
+
+    filas = []
+    for _, fila in df.iloc[fila_cab + 1:].iterrows():
+        texto = str(fila[col_cuenta]) if pd.notna(fila[col_cuenta]) else ''
+        # Solo las subcuentas ('4401-01 SUELDOS OP'); las cuentas madre y los totales se saltan
+        # para no sumar dos veces
+        m = re.match(r'\s*(\d{4})-(\d{2})\s+(.*)', texto)
+        if not m:
+            continue
+        cuenta, subcuenta = m.group(1), f'{m.group(1)}-{m.group(2)}'
+        for c, fecha in col_meses.items():
+            monto = pd.to_numeric(fila[c], errors='coerce')
+            if pd.notna(monto):
+                filas.append({'fecha': fecha, 'cuenta': cuenta, 'subcuenta': subcuenta,
+                              'nombre': re.sub(r'\s+', ' ', m.group(3)).strip().title(),
+                              'tipo': 'Ingreso' if cuenta.startswith('5') else 'Gasto',
+                              'categoria': categoria_eerr(cuenta, subcuenta), 'monto': float(monto)})
+    e = pd.DataFrame(filas, columns=['fecha', 'cuenta', 'subcuenta', 'nombre', 'tipo', 'categoria', 'monto'])
+    return agregar_periodo(e)
+
+
+def es_estado_resultados(archivo):
+    # Reconoce el estado de resultados por su contenido (por si el archivo viene con otro nombre)
+    try:
+        arriba = leer_excel(archivo, sheet_name=0, header=None, nrows=12)
+    except Exception:
+        return False
+    texto = ' '.join(arriba.fillna('').astype(str).values.ravel())
+    return 'ESTADO DE RESULTADOS' in sin_tildes(texto)
+
+
+def unir_tablas(clave, anterior, nueva):
+    # El estado de resultados viene en un archivo por año: se juntan.
+    # Si dos archivos traen el mismo mes, queda el que se cargó después. Las demás bases se reemplazan.
+    if clave != 'eerr' or anterior is None or anterior.empty or 'monto' not in anterior.columns:
+        return nueva
+    junto = pd.concat([anterior[~anterior['fecha'].isin(set(nueva['fecha']))], nueva], ignore_index=True)
+    return junto.sort_values(['fecha', 'subcuenta']).reset_index(drop=True)
+
+
+LIMPIEZA = {'ventas': limpiar_ventas, 'ot_sala': limpiar_ot_sala, 'costos': limpiar_costos, 'eerr': limpiar_eerr}
 
 
 # ---------------------------------------------------------------------------
@@ -320,8 +414,13 @@ def procesar_archivo(archivo, nombre_archivo):
     if any(x in n for x in EXCLUIDAS):
         raise ValueError('es una planilla de convenio / licitación: queda fuera del foco de venta particular.')
     clave = identificar_por_nombre(nombre_archivo) or identificar_por_columnas(archivo)
+    if clave is None and es_estado_resultados(archivo):
+        clave = 'eerr'
     if clave is None:
         raise ValueError('no corresponde a ninguna base del dashboard (ni por su nombre ni por sus columnas).')
+    if clave == 'eerr':
+        # El estado de resultados no tiene una fila de encabezado fija: se lee completo
+        return clave, limpiar_eerr(leer_excel(archivo, sheet_name=0, header=None))
     bruto = normalizar_columnas(leer_excel(archivo, sheet_name=BASES[clave]['hoja'],
                                            header=BASES[clave]['header']), clave)
     faltan = _faltantes(bruto.columns, clave)
@@ -345,7 +444,7 @@ def leer_tabla(ruta, clave):
     # 'ruta' puede ser la ruta del .csv.gz o el archivo ya abierto (por ejemplo, desde un zip)
     df = pd.read_csv(ruta, low_memory=False, compression='gzip',
                      dtype={'ot': 'object', 'folio': 'object', 'arreglo': 'object',
-                            'codigo_descuento': 'object'})
+                            'codigo_descuento': 'object', 'cuenta': 'object', 'subcuenta': 'object'})
     for col in FECHAS.get(clave, []):
         df[col] = pd.to_datetime(df[col], errors='coerce', format='mixed')
     for col in ('es_nc', 'costeable', 'con_descuento'):
